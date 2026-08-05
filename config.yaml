@@ -1,40 +1,85 @@
-camera:
-  source: "${CAMERA_SOURCE}"
-  camera_id: "${CAMERA_ID}"
-  process_every_n_frames: 10
-  reconnect_delay_seconds: 3
-  show_preview: true
+# ==============================================================================
+# AI-Recognition Attendance Configuration (C Edition)
+# ==============================================================================
 
+camera:
+  source: "${CAMERA_RTSP_URL:-0}"             # RTSP URL or camera index (0)
+  camera_id: "office-entrance-01"             # Unique identifier for this CCTV camera
+  process_every_n_frames: 3                   # Process every N frames (3 gives optimal 10 FPS detection)
+  reconnect_delay_seconds: 3                  # Auto reconnect delay on RTSP packet loss
+  show_preview: true                          # Show preview window with HUD overlay
+
+# ------------------------------------------------------------------------------
+# Recognition Zone (ROI) Masking
+# Restricts face detection & ArcFace to the entrance/corridor area on the right.
+# Static seated employees at office desks will be completely ignored!
+# ------------------------------------------------------------------------------
+roi:
+  enabled: true
+  x1_ratio: 0.45                              # Left boundary ratio (45% of width)
+  y1_ratio: 0.05                              # Top boundary ratio (5% of height)
+  x2_ratio: 0.98                              # Right boundary ratio (98% of width)
+  y2_ratio: 0.95                              # Bottom boundary ratio (95% of height)
+
+# ------------------------------------------------------------------------------
+# Motion / Activity Gating
+# Skips SCRFD & ArcFace when no movement is detected in the ROI zone.
+# Reduces CPU/GPU inference usage to nearly 0% when nobody enters.
+# ------------------------------------------------------------------------------
+motion:
+  enabled: true
+  threshold: 18.0                             # Minimum pixel intensity change
+  min_pixel_diff: 250                         # Minimum count of changing pixels to trigger detection
+
+# ------------------------------------------------------------------------------
+# Priority Round-Robin ArcFace Scheduler
+# Limits the number of ArcFace neural inferences per frame to prevent FPS drops.
+# ------------------------------------------------------------------------------
+scheduler:
+  max_arcface_per_frame: 2                    # Maximum ArcFace extractions per frame tick
+  candidate_ttl_seconds: 8.0                  # Track expiration time if face leaves camera view
+  pose_max_yaw_ratio: 0.35                    # Maximum allowed landmark asymmetry ratio (reject steep profiles)
+
+# ------------------------------------------------------------------------------
+# Person & Face Detection / Recognition Models
+# ------------------------------------------------------------------------------
 person_detection:
   model_path: "models/yolov10n.onnx"
   confidence: 0.40
   tracker: "bytetrack"
-  bbox_padding: 0
+  bbox_padding: 10
 
 face:
   model_pack: "buffalo_l"
   model_root: ".insightface"
-  backend: "openvino"
-  openvino_device: "AUTO"
-  detection_size: 640
-  detection_threshold: 0.50
-  min_face_size: 10
-  blur_threshold: 30.0
-  match_threshold: 0.25
-  match_margin: 0.07
-  vote_window: 5
-  votes_required: 3
+  backend: "openvino"                         # "openvino" or "onnxruntime"
+  openvino_device: "AUTO"                     # "AUTO", "CPU", "GPU"
+  detection_size: 640                         # SCRFD input resolution
+  detection_threshold: 0.50                   # Minimum confidence for face detection
+  min_face_size: 35                           # Minimum face bounding box size in pixels
+  blur_threshold: 30.0                        # Laplacian blur threshold (quality gate)
+  match_threshold: 0.25                       # Cosine similarity threshold for ArcFace
+  match_margin: 0.07                          # Minimum margin between top-1 and top-2 candidate
+  vote_window: 5                              # Size of rolling identity vote queue
+  votes_required: 3                           # Number of consistent votes required to confirm identity (3 of 5)
+  pose_max_yaw_ratio: 0.35                    # Landmark pose filter
 
+# ------------------------------------------------------------------------------
+# Attendance Logic & Event Database
+# ------------------------------------------------------------------------------
 attendance:
-  line_y_ratio: 0.62
-  inside_is_below_line: true
-  duplicate_cooldown_seconds: 300
-  event_database: "data/attendance.db"
-  embedding_file: "data/embeddings.bin"
-  allow_insecure_no_liveness: true
+  line_y_ratio: 0.62                          # Virtual crossing line Y ratio
+  inside_is_below_line: true                  # Crossing downward = ENTER, upward = EXIT
+  duplicate_cooldown_seconds: 300             # 5 minutes cooldown before allowing another check-in
+  event_database: "data/attendance.db"        # SQLite local event storage
+  embedding_file: "data/embeddings.bin"       # Enrolled employee face templates database
+  allow_insecure_no_liveness: true            # Bypass liveness check for standard CCTV streams
 
+# ------------------------------------------------------------------------------
+# Backend API Dispatcher
+# ------------------------------------------------------------------------------
 backend:
-  api_url: "${BACKEND_API_URL}"
-  api_key: "${BACKEND_API_KEY}"
   enabled: true
+  api_url: "http://localhost:3000/api/v1/attendance"
+  api_key: "${ML_API_KEY:-your-ml-api-key}"
   timeout: 4.0

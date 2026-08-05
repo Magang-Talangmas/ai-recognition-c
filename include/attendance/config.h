@@ -17,6 +17,26 @@ typedef struct {
 } CameraConfig;
 
 typedef struct {
+    bool enabled;
+    float x1_ratio;
+    float y1_ratio;
+    float x2_ratio;
+    float y2_ratio;
+} RoiConfig;
+
+typedef struct {
+    bool enabled;
+    float threshold;
+    int min_pixel_diff;
+} MotionConfig;
+
+typedef struct {
+    int max_arcface_per_frame;
+    double candidate_ttl_seconds;
+    float pose_max_yaw_ratio;
+} SchedulerConfig;
+
+typedef struct {
     char model_path[512];
     float confidence;
     char tracker[128];
@@ -26,8 +46,8 @@ typedef struct {
 typedef struct {
     char model_pack[128];
     char model_root[512];
-    char backend[64];         /* "onnxruntime" | "openvino" */
-    char openvino_device[64];  /* "AUTO", "CPU", "GPU" */
+    char backend[64];          /* "onnxruntime" | "openvino" */
+    char openvino_device[64];   /* "AUTO", "CPU", "GPU" */
     int detection_size;
     float detection_threshold;
     int min_face_size;
@@ -36,6 +56,7 @@ typedef struct {
     float match_margin;
     int vote_window;
     int votes_required;
+    float pose_max_yaw_ratio;
 } FaceConfig;
 
 typedef struct {
@@ -56,6 +77,9 @@ typedef struct {
 
 typedef struct {
     CameraConfig camera;
+    RoiConfig roi;
+    MotionConfig motion;
+    SchedulerConfig scheduler;
     PersonConfig person;
     FaceConfig face;
     AttendanceConfig attendance;

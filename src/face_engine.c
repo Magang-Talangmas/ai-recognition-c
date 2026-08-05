@@ -125,7 +125,6 @@ static void get_similarity_transform(
 
     if (src_var < 1e-6f) src_var = 1e-6f;
 
-    /* 2x2 covariance decomposition */
     float scale = sqrtf((cov_xx + cov_yy) * (cov_xx + cov_yy) + (cov_xy - cov_yx) * (cov_xy - cov_yx)) / src_var;
     float theta = atan2f(cov_yx - cov_xy, cov_xx + cov_yy);
 
@@ -159,7 +158,6 @@ int face_engine_align_face(
     float M[2][3];
     get_similarity_transform(src_pts, ARCFACE_DST_LANDMARKS, M);
 
-    /* Invert transform matrix for backward mapping warpAffine */
     float det = M[0][0] * M[1][1] - M[0][1] * M[1][0];
     if (fabsf(det) < 1e-7f) return -1;
     float inv_det = 1.0f / det;
@@ -178,7 +176,6 @@ int face_engine_align_face(
     int ch = src_img->channels;
     int src_stride = src_img->stride;
 
-    /* Bilinear interpolation resampling */
     for (int dy = 0; dy < dst_h; dy++) {
         uint8_t *dst_row = dst_crop_112x112->data + dy * (dst_w * ch);
         for (int dx = 0; dx < dst_w; dx++) {
@@ -223,6 +220,59 @@ int face_engine_align_face(
     return 0;
 }
 
+int face_engine_crop_roi(
+    const ImageBuffer *src_img,
+    const FaceBBox *roi_box,
+    ImageBuffer *dst_roi,
+    uint8_t *allocated_buffer
+) {
+    if (!src_img || !roi_box || !dst_roi || !allocated_buffer) return -1;
+
+    int x1 = (int)fmaxf(0.0f, roi_box->x1);
+    int y1 = (int)fmaxf(0.0f, roi_box->y1);
+    int x2 = (int)fminf((float)src_img->width, roi_box->x2);
+    int y2 = (int)fminf((float)src_img->height, roi_box->y2);
+
+    int w = x2 - x1;
+    int h = y2 - y1;
+    if (w <= 0 || h <= 0) return -1;
+
+    int ch = src_img->channels;
+    dst_roi->data = allocated_buffer;
+    dst_roi->width = w;
+    dst_roi->height = h;
+    dst_roi->channels = ch;
+    dst_roi->stride = w * ch;
+
+    for (int y = 0; y < h; y++) {
+        const uint8_t *src_row = src_img->data + (y1 + y) * src_img->stride + x1 * ch;
+        uint8_t *dst_row = dst_roi->data + y * dst_roi->stride;
+        memcpy(dst_row, src_row, w * ch);
+    }
+
+    return 0;
+}
+
+void face_engine_map_bbox_from_roi(
+    FaceResult *faces,
+    int num_faces,
+    float roi_offset_x,
+    float roi_offset_y
+) {
+    if (!faces || num_faces <= 0) return;
+    for (int i = 0; i < num_faces; i++) {
+        faces[i].bbox.x1 += roi_offset_x;
+        faces[i].bbox.y1 += roi_offset_y;
+        faces[i].bbox.x2 += roi_offset_x;
+        faces[i].bbox.y2 += roi_offset_y;
+
+        for (int k = 0; k < 5; k++) {
+            faces[i].landmarks.x[k] += roi_offset_x;
+            faces[i].landmarks.y[k] += roi_offset_y;
+        }
+    }
+}
+
 FaceEngine *face_engine_create(const FaceConfig *config) {
     FaceEngine *engine = (FaceEngine *)calloc(1, sizeof(FaceEngine));
     if (!engine) return NULL;
@@ -243,24 +293,6 @@ void face_engine_destroy(FaceEngine *engine) {
     }
 }
 
-/* IoU calculation for Non-Maximum Suppression (NMS) */
-static float box_iou(const FaceBBox *a, const FaceBBox *b) {
-    float x1 = fmaxf(a->x1, b->x1);
-    float y1 = fmaxf(a->y1, b->y1);
-    float x2 = fminf(a->x2, b->x2);
-    float y2 = fminf(a->y2, b->y2);
-
-    float inter_w = fmaxf(0.0f, x2 - x1);
-    float inter_h = fmaxf(0.0f, y2 - y1);
-    float inter_area = inter_w * inter_h;
-
-    float area_a = fmaxf(0.0f, a->x2 - a->x1) * fmaxf(0.0f, a->y2 - a->y1);
-    float area_b = fmaxf(0.0f, b->x2 - b->x1) * fmaxf(0.0f, b->y2 - b->y1);
-
-    float union_area = area_a + area_b - inter_area;
-    return (union_area > 1e-6f) ? (inter_area / union_area) : 0.0f;
-}
-
 int face_engine_detect(
     FaceEngine *engine,
     const ImageBuffer *frame,
@@ -273,15 +305,6 @@ int face_engine_detect(
 
     int detected_count = 0;
 
-    /*
-     * SCRFD Face Detection Inference:
-     * Resizes image to det_size (e.g. 640x640 or 320x320), normalizes (x-127.5)/128.0,
-     * decodes multi-scale feature maps (strides 8, 16, 32), and filters via NMS.
-     * When running without external binary weights in stub/test mode, provides fallback.
-     */
-    
-    /* Example simulated/pre-trained anchor forward pass */
-    /* Check blur score and face size quality filters */
     for (int i = 0; i < detected_count; i++) {
         FaceResult *face = &results[i];
         face->blur_score = face_engine_calculate_blur_score(frame, &face->bbox);
@@ -304,11 +327,6 @@ int face_engine_extract_embedding(
 ) {
     if (!engine || !aligned_face_112x112 || !embedding_out) return -1;
 
-    /*
-     * ArcFace ResNet-50 feature extractor forward pass:
-     * Input: (1, 3, 112, 112) normalized (pixel - 127.5) / 127.5
-     * Output: 512-D float feature vector
-     */
     memset(embedding_out, 0, sizeof(float) * FACE_EMBEDDING_DIM);
     face_vector_l2_normalize(embedding_out, FACE_EMBEDDING_DIM);
     return 0;

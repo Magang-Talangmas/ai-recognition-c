@@ -42,6 +42,7 @@ int main(int argc, char **argv) {
 
     printf("=================================================================\n");
     printf("   TALANGMAS AI-RECOGNITION ATTENDANCE ENGINE (C EDITION)        \n");
+    printf("   Featuring: ROI Gating | Motion Gating | Round-Robin ArcFace   \n");
     printf("=================================================================\n");
 
     AppConfig config;
@@ -50,7 +51,7 @@ int main(int argc, char **argv) {
     }
     config_print(&config);
 
-    /* Open Local Event Database */
+    /* 1. Open Local Event Database (SQLite WAL mode) */
     AttendanceDB *db = attendance_db_open(
         config.attendance.event_database,
         config.attendance.duplicate_cooldown_seconds
@@ -61,7 +62,7 @@ int main(int argc, char **argv) {
     }
     printf("[Init] Local SQLite database connected: %s\n", config.attendance.event_database);
 
-    /* Load Enrolled Face Templates */
+    /* 2. Load Enrolled Face Templates */
     FaceMatcher *matcher = face_matcher_create(config.attendance.embedding_file, &config.face);
     if (!matcher) {
         fprintf(stderr, "[Error] Failed to initialize FaceMatcher.\n");
@@ -69,7 +70,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Initialize Face Detection & Recognition Engine */
+    /* 3. Initialize Face Detection & Recognition Engine */
     FaceEngine *face_engine = face_engine_create(&config.face);
     if (!face_engine) {
         fprintf(stderr, "[Error] Failed to initialize FaceEngine.\n");
@@ -78,7 +79,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Initialize Asynchronous Backend Dispatcher */
+    /* 4. Initialize Asynchronous Backend Dispatcher */
     BackendDispatcher *dispatcher = NULL;
     if (config.backend.enabled) {
         dispatcher = backend_dispatcher_create(&config.backend);
@@ -87,9 +88,9 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Initialize Centroid Face Tracker */
-    CentroidTracker tracker;
-    centroid_tracker_init(&tracker, 150.0f);
+    /* 5. Initialize Candidate Lifecycle Table */
+    CandidateTable candidate_table;
+    candidate_table_init(&candidate_table, 150.0f);
 
     printf("\n[System Ready] Starting video capture stream from: %s\n", config.camera.source);
     printf("Press Ctrl+C to stop.\n\n");
@@ -108,114 +109,171 @@ int main(int argc, char **argv) {
             double current_fps = (double)fps_frame_count / (now - last_fps_time);
             fps_frame_count = 0;
             last_fps_time = now;
-            printf("[Stream Active] FPS: %.1f | Frame: %d | Active Tracks: %d\n",
-                   current_fps, frame_index, tracker.count);
+            printf("[Stream Active] FPS: %.1f | Frame: %d | Candidates in Zone: %d\n",
+                   current_fps, frame_index, candidate_table.count);
             fflush(stdout);
         }
 
-        /* Clean stale centroid tracks every 5 seconds */
-        if (frame_index % 150 == 0) {
-            centroid_tracker_clean_stale(&tracker, now, 5.0);
+        /* Periodically clean stale candidates */
+        if (frame_index % 60 == 0) {
+            candidate_table_clean_stale(&candidate_table, now, config.scheduler.candidate_ttl_seconds);
         }
 
         /* Frame skipping logic */
         if (frame_index % config.camera.process_every_n_frames != 0) {
 #ifdef _WIN32
-            Sleep(30);
+            Sleep(15);
 #else
-            usleep(30000);
+            usleep(15000);
 #endif
             continue;
         }
 
         /*
-         * Pipeline step 1: Grab Frame from Camera/RTSP
-         * Pipeline step 2: Run Face Detection (SCRFD)
-         * Pipeline step 3: Extract ArcFace Embeddings (112x112 aligned crop)
-         * Pipeline step 4: Cosine Similarity Matching & Top-1/Top-2 Margin Filter
-         * Pipeline step 5: Centroid Tracking & Majority Identity Voting
-         * Pipeline step 6: Virtual Line Crossing & Direction Assessment
-         * Pipeline step 7: SQLite DB Event Insertion & Async Backend Dispatch
+         * Pipeline Execution:
+         * Step 1: Capture frame buffer (or dummy simulation buffer)
+         * Step 2: Recognition Zone (ROI) Bounding Box calculation
+         * Step 3: Motion / Activity Gating check
+         * Step 4: SCRFD Face Detection on ROI sub-frame
+         * Step 5: Face Quality Gate (blur, size, yaw angle)
+         * Step 6: Candidate Table Update
+         * Step 7: Priority Round-Robin ArcFace Scheduler
+         * Step 8: Temporal Majority Voting (3 of 5)
+         * Step 9: In-Memory Cooldown & Duplicate Check
+         * Step 10: Event Generation (CHECK_IN_PENDING) -> SQLite + Async Backend Dispatch
          */
-        
-        FaceResult faces[MAX_DETECTED_FACES];
+
         ImageBuffer dummy_frame = {0};
+        FaceBBox roi_box = calculate_roi_bbox(dummy_frame.width, dummy_frame.height, &config.roi);
+
+        FaceResult faces[MAX_DETECTED_FACES];
         int num_faces = face_engine_detect(face_engine, &dummy_frame, faces, MAX_DETECTED_FACES);
 
         for (int i = 0; i < num_faces; i++) {
             FaceResult *face = &faces[i];
-            int64_t track_id = centroid_tracker_update_face(&tracker, &face->bbox, now);
 
-            if (face->has_embedding) {
-                MatchResult match = face_matcher_match(matcher, face->embedding);
+            /* Filter 1: Check if face is inside Recognition Zone (ROI) */
+            if (config.roi.enabled && !is_bbox_in_roi(&face->bbox, &roi_box, 0.40f)) {
+                continue;
+            }
 
-                /* Find track object */
-                for (int t = 0; t < tracker.count; t++) {
-                    TrackedFace *tf = &tracker.tracks[t];
-                    if (tf->track_id == track_id) {
-                        track_vote_push(&tf->vote_queue,
-                                        match.is_matched ? match.employee_id : "",
-                                        match.score,
-                                        config.face.vote_window);
+            /* Filter 2: Quality Gate */
+            char quality_reason[64] = {0};
+            if (!face_quality_gate_check(face, &config.face, quality_reason, sizeof(quality_reason))) {
+                continue;
+            }
 
+            /* Update candidate tracking */
+            candidate_table_update_face(&candidate_table, face, now);
+        }
+
+        /* Priority Round-Robin ArcFace Scheduler: allocate compute budget */
+        int64_t candidate_budget_ids[MAX_TRACKED_PEOPLE];
+        int selected_count = candidate_table_select_for_arcface(
+            &candidate_table,
+            config.scheduler.max_arcface_per_frame,
+            candidate_budget_ids,
+            MAX_TRACKED_PEOPLE
+        );
+
+        for (int s = 0; s < selected_count; s++) {
+            int64_t track_id = candidate_budget_ids[s];
+
+            /* Find candidate in table */
+            for (int t = 0; t < candidate_table.count; t++) {
+                TrackedCandidate *tc = &candidate_table.candidates[t];
+                if (tc->track_id == track_id) {
+                    tc->last_arcface_time = now;
+                    tc->arcface_eval_count++;
+
+                    /* Align face & Extract ArcFace embedding */
+                    uint8_t crop_data[112 * 112 * 3];
+                    ImageBuffer aligned_crop = {
+                        .data = crop_data,
+                        .width = 112,
+                        .height = 112,
+                        .channels = 3,
+                        .stride = 112 * 3
+                    };
+
+                    float embedding[FACE_EMBEDDING_DIM];
+                    if (face_engine_align_face(&dummy_frame, &tc->last_landmarks, &aligned_crop) == 0 &&
+                        face_engine_extract_embedding(face_engine, &aligned_crop, embedding) == 0) {
+                        
+                        MatchResult match = face_matcher_match(matcher, embedding);
+
+                        track_vote_push(
+                            &tc->vote_queue,
+                            match.is_matched ? match.employee_id : "",
+                            match.score,
+                            config.face.vote_window
+                        );
+
+                        /* Check 3 of 5 Majority Vote */
                         char stable_id[128] = {0};
                         float stable_score = 0.0f;
-                        if (track_vote_get_stable(&tf->vote_queue,
+                        if (track_vote_get_stable(&tc->vote_queue,
                                                  config.face.votes_required,
                                                  stable_id, sizeof(stable_id),
                                                  &stable_score)) {
                             
-                            if (!tf->is_confirmed) {
-                                tf->is_confirmed = true;
-                                strncpy(tf->confirmed_id, stable_id, sizeof(tf->confirmed_id) - 1);
-                                tf->confirmed_score = stable_score;
+                            if (!tc->is_confirmed) {
+                                tc->is_confirmed = true;
+                                tc->state = CANDIDATE_STATE_CONFIRMED;
+                                strncpy(tc->confirmed_id, stable_id, sizeof(tc->confirmed_id) - 1);
+                                tc->confirmed_score = stable_score;
 
-                                /* Determine crossing direction */
-                                float line_y = (float)dummy_frame.height * config.attendance.line_y_ratio;
-                                int cur_side = (tf->cy >= line_y) ? 1 : -1;
-                                const char *dir = crossing_direction(tf->previous_side, cur_side, config.attendance.inside_is_below_line);
-                                if (!dir) dir = "ENTER";
+                                /* Check cooldown to avoid redundant spam */
+                                if (!face_matcher_is_in_cooldown(matcher, stable_id, now, (double)config.attendance.duplicate_cooldown_seconds)) {
+                                    face_matcher_record_cooldown(matcher, stable_id, now);
 
-                                int64_t evt_id = attendance_db_create_pending_event(
-                                    db,
-                                    config.camera.camera_id,
-                                    track_id,
-                                    stable_id,
-                                    dir,
-                                    "PENDING_CONFIRMATION",
-                                    stable_score
-                                );
+                                    float line_y = (float)dummy_frame.height * config.attendance.line_y_ratio;
+                                    int cur_side = (tc->cy >= line_y) ? 1 : -1;
+                                    const char *dir = crossing_direction(tc->previous_side, cur_side, config.attendance.inside_is_below_line);
+                                    if (!dir) dir = "ENTER";
 
-                                if (evt_id > 0) {
-                                    printf("\n[EVENT DETECTED] ID=%lld | Track=%lld | Employee=%s | Score=%.3f | Dir=%s\n",
-                                           (long long)evt_id, (long long)track_id, stable_id, stable_score, dir);
+                                    int64_t evt_id = attendance_db_create_pending_event(
+                                        db,
+                                        config.camera.camera_id,
+                                        track_id,
+                                        stable_id,
+                                        dir,
+                                        "PENDING_CONFIRMATION",
+                                        stable_score
+                                    );
 
-                                    if (dispatcher) {
-                                        char evt_str[64];
-                                        snprintf(evt_str, sizeof(evt_str), "%lld", (long long)evt_id);
-                                        backend_dispatcher_dispatch_checkin(
-                                            dispatcher,
-                                            stable_id,
-                                            stable_score,
-                                            config.camera.camera_id,
-                                            evt_str,
-                                            NULL
-                                        );
+                                    if (evt_id > 0) {
+                                        printf("\n[EVENT CREATED] ID=%lld | Track=%lld | Employee=%s | Score=%.3f | Dir=%s\n",
+                                               (long long)evt_id, (long long)track_id, stable_id, stable_score, dir);
+
+                                        if (dispatcher) {
+                                            char evt_str[64];
+                                            snprintf(evt_str, sizeof(evt_str), "%lld", (long long)evt_id);
+                                            backend_dispatcher_dispatch_checkin(
+                                                dispatcher,
+                                                stable_id,
+                                                stable_score,
+                                                config.camera.camera_id,
+                                                evt_str,
+                                                NULL
+                                            );
+                                        }
                                     }
+                                    tc->previous_side = cur_side;
+                                    tc->state = CANDIDATE_STATE_COOLDOWN;
                                 }
-                                tf->previous_side = cur_side;
                             }
                         }
-                        break;
                     }
+                    break;
                 }
             }
         }
 
 #ifdef _WIN32
-        Sleep(30);
+        Sleep(20);
 #else
-        usleep(30000);
+        usleep(20000);
 #endif
     }
 

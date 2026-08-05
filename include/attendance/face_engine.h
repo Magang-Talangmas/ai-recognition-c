@@ -32,14 +32,15 @@ typedef struct {
     bool quality_ok;
     float blur_score;
     float detection_score;
+    char quality_status[64];
 } FaceResult;
 
 typedef struct {
-    uint8_t *data;      /* BGR interleaved pixel data */
+    uint8_t *data;       /* BGR interleaved pixel data */
     int width;
     int height;
-    int channels;       /* usually 3 */
-    int stride;         /* bytes per row */
+    int channels;        /* usually 3 */
+    int stride;          /* bytes per row */
 } ImageBuffer;
 
 typedef struct FaceEngine FaceEngine;
@@ -56,6 +57,22 @@ int face_engine_detect(
     const ImageBuffer *frame,
     FaceResult *results,
     int max_faces
+);
+
+/* Crop ROI sub-region into destination image buffer */
+int face_engine_crop_roi(
+    const ImageBuffer *src_img,
+    const FaceBBox *roi_box,
+    ImageBuffer *dst_roi,
+    uint8_t *allocated_buffer
+);
+
+/* Map coordinates of faces detected inside ROI back to original full frame */
+void face_engine_map_bbox_from_roi(
+    FaceResult *faces,
+    int num_faces,
+    float roi_offset_x,
+    float roi_offset_y
 );
 
 /* Extract 512-D ArcFace embedding for an aligned face crop (112x112 BGR) */

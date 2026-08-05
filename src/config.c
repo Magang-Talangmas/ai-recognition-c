@@ -134,6 +134,23 @@ static void set_default_config(AppConfig *cfg) {
     cfg->camera.reconnect_delay_seconds = 3;
     cfg->camera.show_preview = true;
 
+    /* Recognition Zone (ROI) defaults: stairs/corridor area on the right half */
+    cfg->roi.enabled = true;
+    cfg->roi.x1_ratio = 0.45f;
+    cfg->roi.y1_ratio = 0.05f;
+    cfg->roi.x2_ratio = 0.98f;
+    cfg->roi.y2_ratio = 0.95f;
+
+    /* Motion Gating defaults */
+    cfg->motion.enabled = true;
+    cfg->motion.threshold = 18.0f;
+    cfg->motion.min_pixel_diff = 250;
+
+    /* Scheduler defaults */
+    cfg->scheduler.max_arcface_per_frame = 2;
+    cfg->scheduler.candidate_ttl_seconds = 8.0;
+    cfg->scheduler.pose_max_yaw_ratio = 0.35f;
+
     /* Person Detection defaults */
     snprintf(cfg->person.model_path, sizeof(cfg->person.model_path), "models/yolov10n.onnx");
     cfg->person.confidence = 0.40f;
@@ -147,12 +164,13 @@ static void set_default_config(AppConfig *cfg) {
     snprintf(cfg->face.openvino_device, sizeof(cfg->face.openvino_device), "AUTO");
     cfg->face.detection_size = 640;
     cfg->face.detection_threshold = 0.50f;
-    cfg->face.min_face_size = 10;
+    cfg->face.min_face_size = 35;
     cfg->face.blur_threshold = 30.0f;
     cfg->face.match_threshold = 0.25f;
     cfg->face.match_margin = 0.07f;
     cfg->face.vote_window = 5;
     cfg->face.votes_required = 3;
+    cfg->face.pose_max_yaw_ratio = 0.35f;
 
     /* Attendance defaults */
     cfg->attendance.line_y_ratio = 0.62f;
@@ -177,7 +195,6 @@ int config_load(const char *config_path, AppConfig *config) {
     const char *path = config_path ? config_path : "config.yaml";
     FILE *f = fopen(path, "r");
     if (!f) {
-        /* Fallback check in current directory */
         return 0;
     }
 
@@ -188,7 +205,7 @@ int config_load(const char *config_path, AppConfig *config) {
         char *trimmed = trim_whitespace(line);
         if (*trimmed == '#' || *trimmed == '\0') continue;
 
-        /* Check for section header (e.g. "camera:", "face:") */
+        /* Check for section header (e.g. "camera:", "face:", "roi:") */
         char *colon = strchr(trimmed, ':');
         if (!colon) continue;
 
@@ -223,6 +240,26 @@ int config_load(const char *config_path, AppConfig *config) {
             else if (strcmp(key, "reconnect_delay_seconds") == 0 && val[0]) config->camera.reconnect_delay_seconds = atoi(val);
             else if (strcmp(key, "show_preview") == 0 && val[0]) config->camera.show_preview = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
         }
+        /* Recognition Zone (ROI) Section */
+        else if (strcmp(current_section, "roi") == 0) {
+            if (strcmp(key, "enabled") == 0 && val[0]) config->roi.enabled = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+            else if (strcmp(key, "x1_ratio") == 0 && val[0]) config->roi.x1_ratio = (float)atof(val);
+            else if (strcmp(key, "y1_ratio") == 0 && val[0]) config->roi.y1_ratio = (float)atof(val);
+            else if (strcmp(key, "x2_ratio") == 0 && val[0]) config->roi.x2_ratio = (float)atof(val);
+            else if (strcmp(key, "y2_ratio") == 0 && val[0]) config->roi.y2_ratio = (float)atof(val);
+        }
+        /* Motion Gating Section */
+        else if (strcmp(current_section, "motion") == 0) {
+            if (strcmp(key, "enabled") == 0 && val[0]) config->motion.enabled = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+            else if (strcmp(key, "threshold") == 0 && val[0]) config->motion.threshold = (float)atof(val);
+            else if (strcmp(key, "min_pixel_diff") == 0 && val[0]) config->motion.min_pixel_diff = atoi(val);
+        }
+        /* Scheduler Section */
+        else if (strcmp(current_section, "scheduler") == 0) {
+            if (strcmp(key, "max_arcface_per_frame") == 0 && val[0]) config->scheduler.max_arcface_per_frame = atoi(val);
+            else if (strcmp(key, "candidate_ttl_seconds") == 0 && val[0]) config->scheduler.candidate_ttl_seconds = atof(val);
+            else if (strcmp(key, "pose_max_yaw_ratio") == 0 && val[0]) config->scheduler.pose_max_yaw_ratio = (float)atof(val);
+        }
         /* Person Detection Section */
         else if (strcmp(current_section, "person_detection") == 0) {
             if (strcmp(key, "model_path") == 0 && val[0]) strncpy(config->person.model_path, val, sizeof(config->person.model_path) - 1);
@@ -244,6 +281,7 @@ int config_load(const char *config_path, AppConfig *config) {
             else if (strcmp(key, "match_margin") == 0 && val[0]) config->face.match_margin = (float)atof(val);
             else if (strcmp(key, "vote_window") == 0 && val[0]) config->face.vote_window = atoi(val);
             else if (strcmp(key, "votes_required") == 0 && val[0]) config->face.votes_required = atoi(val);
+            else if (strcmp(key, "pose_max_yaw_ratio") == 0 && val[0]) config->face.pose_max_yaw_ratio = (float)atof(val);
         }
         /* Attendance Section */
         else if (strcmp(current_section, "attendance") == 0) {
@@ -275,6 +313,16 @@ void config_print(const AppConfig *cfg) {
            cfg->camera.source, cfg->camera.camera_id,
            cfg->camera.process_every_n_frames,
            cfg->camera.show_preview ? "true" : "false");
+    printf("[ROI Zone] enabled: %s | box: [%.2f, %.2f, %.2f, %.2f]\n",
+           cfg->roi.enabled ? "true" : "false",
+           cfg->roi.x1_ratio, cfg->roi.y1_ratio, cfg->roi.x2_ratio, cfg->roi.y2_ratio);
+    printf("[Motion Gate] enabled: %s | threshold: %.1f | min_pixels: %d\n",
+           cfg->motion.enabled ? "true" : "false",
+           cfg->motion.threshold, cfg->motion.min_pixel_diff);
+    printf("[Scheduler] max_arcface/frame: %d | candidate_ttl: %.1fs | max_yaw: %.2f\n",
+           cfg->scheduler.max_arcface_per_frame,
+           cfg->scheduler.candidate_ttl_seconds,
+           cfg->scheduler.pose_max_yaw_ratio);
     printf("[Face] backend: %s | device: %s | size: %d | det_thresh: %.2f\n",
            cfg->face.backend, cfg->face.openvino_device,
            cfg->face.detection_size, cfg->face.detection_threshold);

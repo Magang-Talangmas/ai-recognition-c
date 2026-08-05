@@ -8,11 +8,18 @@
 #define MATCHER_MAGIC "FACES1\0\0"
 #define MAX_ENROLLED_EMPLOYEES 1024
 
+typedef struct {
+    char employee_id[128];
+    double last_confirmed_time;
+} CooldownEntry;
+
 struct FaceMatcher {
     char employee_ids[MAX_ENROLLED_EMPLOYEES][128];
     float templates[MAX_ENROLLED_EMPLOYEES * FACE_EMBEDDING_DIM];
     int count;
     FaceConfig config;
+    CooldownEntry cooldowns[MAX_ENROLLED_EMPLOYEES];
+    int cooldown_count;
 };
 
 FaceMatcher *face_matcher_create(const char *embedding_file, const FaceConfig *config) {
@@ -25,7 +32,6 @@ FaceMatcher *face_matcher_create(const char *embedding_file, const FaceConfig *c
 
     FILE *f = fopen(embedding_file, "rb");
     if (!f) {
-        /* If binary file doesn't exist, try loading from csv / text fallback or return empty */
         printf("[Matcher] Info: Template file '%s' not found or empty. Enroll faces to populate.\n", embedding_file);
         return matcher;
     }
@@ -137,6 +143,37 @@ MatchResult face_matcher_match(const FaceMatcher *matcher, const float *embeddin
     }
 
     return result;
+}
+
+bool face_matcher_is_in_cooldown(const FaceMatcher *matcher, const char *employee_id, double now_time, double cooldown_seconds) {
+    if (!matcher || !employee_id || cooldown_seconds <= 0) return false;
+
+    for (int i = 0; i < matcher->cooldown_count; i++) {
+        if (strcmp(matcher->cooldowns[i].employee_id, employee_id) == 0) {
+            double elapsed = now_time - matcher->cooldowns[i].last_confirmed_time;
+            if (elapsed < cooldown_seconds) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void face_matcher_record_cooldown(FaceMatcher *matcher, const char *employee_id, double now_time) {
+    if (!matcher || !employee_id) return;
+
+    for (int i = 0; i < matcher->cooldown_count; i++) {
+        if (strcmp(matcher->cooldowns[i].employee_id, employee_id) == 0) {
+            matcher->cooldowns[i].last_confirmed_time = now_time;
+            return;
+        }
+    }
+
+    if (matcher->cooldown_count < MAX_ENROLLED_EMPLOYEES) {
+        int idx = matcher->cooldown_count++;
+        strncpy(matcher->cooldowns[idx].employee_id, employee_id, sizeof(matcher->cooldowns[idx].employee_id) - 1);
+        matcher->cooldowns[idx].last_confirmed_time = now_time;
+    }
 }
 
 int face_matcher_save_database(

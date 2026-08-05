@@ -27,6 +27,12 @@ void face_matcher_destroy(FaceMatcher *matcher);
 /* Match a query face embedding (512 float vector) against enrolled templates */
 MatchResult face_matcher_match(const FaceMatcher *matcher, const float *embedding);
 
+/* Fast in-memory check to see if an employee is currently in cooldown window */
+bool face_matcher_is_in_cooldown(const FaceMatcher *matcher, const char *employee_id, double now_time, double cooldown_seconds);
+
+/* Record check-in timestamp for an employee to start cooldown */
+void face_matcher_record_cooldown(FaceMatcher *matcher, const char *employee_id, double now_time);
+
 /* Get number of enrolled employee templates */
 int face_matcher_get_count(const FaceMatcher *matcher);
 
