@@ -9,9 +9,7 @@
 #include <onnxruntime_c_api.h>
 #endif
 
-#ifdef HAVE_OPENVINO
-#include <openvino/c/openvino.h>
-#endif
+
 
 struct FaceEngine {
     FaceConfig config;
@@ -253,8 +251,8 @@ FaceEngine *face_engine_create(const FaceConfig *config) {
     }
 
     engine->is_initialized = true;
-    printf("[FaceEngine] Initialized SCRFD + ArcFace engine (backend: %s, device: %s)\n",
-           engine->config.backend, engine->config.openvino_device);
+    printf("[FaceEngine] Initialized SCRFD + ArcFace engine (backend: %s)\n",
+           engine->config.backend);
     return engine;
 }
 
@@ -293,8 +291,8 @@ int face_engine_detect(
     (void)results;
     (void)max_faces;
     /*
-     * Native C face detection is reserved for direct C ONNX/OpenVINO bindings.
-     * In the OpenVINO feeder pipeline, real detections & embeddings are provided
+     * Native C face detection is reserved for direct C ONNX bindings.
+     * In the Python feeder pipeline, real detections & embeddings are provided
      * via the feeder IPC. No fake skin-tone heuristic or fallback faces are returned.
      */
     return 0;
@@ -309,7 +307,7 @@ int face_engine_extract_embedding(
     (void)aligned_face_112x112;
     (void)embedding_out;
     /*
-     * Real embeddings are extracted via OpenVINO in the feeder pipeline.
+     * Real embeddings are extracted via the feeder pipeline.
      * No synthetic or fake trigonometric embeddings are generated.
      */
     return -1;

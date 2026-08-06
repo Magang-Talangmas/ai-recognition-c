@@ -2,7 +2,7 @@
 High-Performance Zero-Latency Async RTSP Substream Feeder for Talangmas AI-Recognition (C Edition).
 Features:
   - Threaded real-time RTSP frame grabber with 0-buffer lag (drops stale frames).
-  - Asynchronous / multi-threaded SCRFD + ArcFace (OpenVINO) face detection.
+  - Asynchronous / multi-threaded SCRFD + ArcFace face detection.
   - Sliced RTSP substream URL configuration support.
   - Dedicated binary pipe isolation (immune to stdout text contamination).
 """
@@ -413,7 +413,7 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                 <span class="dot"></span>
                 <span>Talangmas AI Recognition - Camera Stream (C Edition)</span>
             </div>
-            <span class="badge">OpenVINO FP16 Engine</span>
+            <span class="badge">ONNXRuntime Engine</span>
         </div>
         <div class="video-container">
             <img src="/stream" alt="Live AI Camera Feed" />

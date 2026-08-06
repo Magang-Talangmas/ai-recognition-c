@@ -26,8 +26,7 @@ typedef struct {
 typedef struct {
     char model_pack[128];
     char model_root[512];
-    char backend[64];         /* "onnxruntime" | "openvino" */
-    char openvino_device[64];  /* "AUTO", "CPU", "GPU" */
+    char backend[64];         /* "onnx" */
     int detection_size;
     float detection_threshold;
     int min_face_size;
