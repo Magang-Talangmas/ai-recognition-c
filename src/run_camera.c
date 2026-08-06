@@ -11,6 +11,8 @@
 #include "attendance/api_dispatcher.h"
 #include "attendance/gui_preview.h"
 #include "attendance/video_capture.h"
+#include "attendance/video_capture.h"
+
 
 #include <signal.h>
 
@@ -31,6 +33,15 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_sigint);
 #ifdef SIGTERM
     signal(SIGTERM, handle_sigint);
+#endif
+
+#ifdef _WIN32
+    HANDLE h_instance_mutex = CreateMutexA(NULL, TRUE, "Global\\TMAS_AI_CAMERA_RUNNER_MUTEX");
+    if (!h_instance_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        fprintf(stderr, "[Error] Another instance of AI Camera Runner is already active! Exiting to prevent RTSP conflict.\n");
+        if (h_instance_mutex) CloseHandle(h_instance_mutex);
+        return 1;
+    }
 #endif
 
     const char *config_file = "config.yaml";
@@ -55,6 +66,9 @@ int main(int argc, char **argv) {
     );
     if (!db) {
         fprintf(stderr, "[Error] Failed to initialize SQLite database '%s'\n", config.attendance.event_database);
+#ifdef _WIN32
+        if (h_instance_mutex) { ReleaseMutex(h_instance_mutex); CloseHandle(h_instance_mutex); }
+#endif
         return 1;
     }
     printf("[Init] Local SQLite database connected: %s\n", config.attendance.event_database);
@@ -64,6 +78,9 @@ int main(int argc, char **argv) {
     if (!matcher) {
         fprintf(stderr, "[Error] Failed to initialize FaceMatcher.\n");
         attendance_db_close(db);
+#ifdef _WIN32
+        if (h_instance_mutex) { ReleaseMutex(h_instance_mutex); CloseHandle(h_instance_mutex); }
+#endif
         return 1;
     }
 
@@ -73,6 +90,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[Error] Failed to initialize FaceEngine.\n");
         face_matcher_destroy(matcher);
         attendance_db_close(db);
+#ifdef _WIN32
+        if (h_instance_mutex) { ReleaseMutex(h_instance_mutex); CloseHandle(h_instance_mutex); }
+#endif
         return 1;
     }
 
@@ -98,59 +118,54 @@ int main(int argc, char **argv) {
     /* Initialize Native Windows GUI Preview Window */
     GuiWindow *win = NULL;
     if (config.camera.show_preview) {
-        win = gui_window_create("Talangmas AI Recognition - Camera Stream (C Edition)", 640, 480);
-        if (win) {
-            printf("[GUI] Native Camera Stream Preview Window opened.\n");
-        }
+        win = gui_window_create("Talangmas AI Attendance - Live View", 640, 480);
     }
 
-    printf("\n[System Ready] Starting video capture stream from: %s\n", config.camera.source);
-    printf("Press Ctrl+C or close preview window (Q / ESC) to stop.\n\n");
 
-    int frame_index = 0;
-    double last_fps_time = get_monotonic_time_seconds();
-    int fps_frame_count = 0;
-    double current_fps = 30.0;
-    char last_event_msg[128] = {0};
 
-    /* Main Video Processing Loop */
+    printf("\n[Pipeline Ready] Processing live video stream at 640x480...\n");
+
+    ImageBuffer frame;
+    frame.width = 640;
+    frame.height = 480;
+    frame.channels = 3;
+    frame.stride = 640 * 3;
+    frame.data = (uint8_t *)malloc(640 * 480 * 3);
+
+    FaceResult faces[MAX_DETECTED_FACES];
+    char last_event_msg[256] = "System Idle";
+
+    double last_time = get_monotonic_time_seconds();
+    int frame_counter = 0;
+    double current_fps = 0.0;
+
     while (g_running) {
-        double now = get_monotonic_time_seconds();
-
-        /* Process GUI window events (close button, Q, ESC) */
         if (win && !gui_window_process_events(win)) {
-            printf("[GUI] Window close requested by user.\n");
+            printf("\n[GUI] Window closed by user.\n");
             break;
         }
 
-        frame_index++;
-        fps_frame_count++;
-
-        if (now - last_fps_time >= 2.0) {
-            current_fps = (double)fps_frame_count / (now - last_fps_time);
-            fps_frame_count = 0;
-            last_fps_time = now;
-            printf("[Stream Active] FPS: %.1f | Frame: %d | Active Tracks: %d\n",
-                   current_fps, frame_index, tracker.count);
-            fflush(stdout);
+        double now = get_monotonic_time_seconds();
+        frame_counter++;
+        if (now - last_time >= 1.0) {
+            current_fps = (double)frame_counter / (now - last_time);
+            frame_counter = 0;
+            last_time = now;
         }
 
-        /* Clean stale centroid tracks periodically */
-        if (frame_index % 150 == 0) {
-            centroid_tracker_clean_stale(&tracker, now, 5.0);
-        }
-
-        /* Grab Video Frame and Real Face Detections */
-        ImageBuffer frame = {0};
-        FaceResult faces[MAX_DETECTED_FACES];
+        /* Read frame and detected faces from feeder IPC */
         int num_faces = 0;
-        double t_infer_start = get_monotonic_time_seconds();
-
         if (cap) {
-            video_capture_read_frame(cap, &frame, faces, MAX_DETECTED_FACES, &num_faces, now);
+            bool ok = video_capture_read_frame(cap, &frame, faces, MAX_DETECTED_FACES, &num_faces, now);
+            if (!ok) {
+                /* Feeder process disconnected or terminating */
+                break;
+            }
+        } else {
+            memset(frame.data, 30, 640 * 480 * 3);
         }
 
-        /* Fallback face engine detection if needed */
+        double t_infer_start = get_monotonic_time_seconds();
         if (num_faces == 0 && face_engine) {
             num_faces = face_engine_detect(face_engine, &frame, faces, MAX_DETECTED_FACES);
         }
@@ -159,11 +174,21 @@ int main(int argc, char **argv) {
         for (int i = 0; i < num_faces; i++) {
             FaceResult *face = &faces[i];
             int64_t track_id = centroid_tracker_update_face(&tracker, &face->bbox, now);
+            face->track_id = track_id;
+
+            if (face->has_embedding && !face_is_valid_embedding(face->embedding, FACE_EMBEDDING_DIM)) {
+                face->has_embedding = false;
+            }
 
             if (face->has_embedding) {
                 MatchResult match = face_matcher_match(matcher, face->embedding);
+                face->match_score = match.score;
 
-                /* Find track object */
+                if (match.is_matched && match.employee_id[0] != '\0') {
+                    strncpy(face->matched_name, match.employee_id, sizeof(face->matched_name) - 1);
+                    face->is_recognized = true;
+                }
+
                 for (int t = 0; t < tracker.count; t++) {
                     TrackedFace *tf = &tracker.tracks[t];
                     if (tf->track_id == track_id) {
@@ -172,56 +197,57 @@ int main(int argc, char **argv) {
                                         match.score,
                                         config.face.vote_window);
 
-                        char stable_id[128] = {0};
+                        char stable_name[128] = {0};
                         float stable_score = 0.0f;
                         if (track_vote_get_stable(&tf->vote_queue,
                                                  config.face.votes_required,
-                                                 stable_id, sizeof(stable_id),
+                                                 stable_name, sizeof(stable_name),
                                                  &stable_score)) {
                             
+                            strncpy(face->matched_name, stable_name, sizeof(face->matched_name) - 1);
+                            face->match_score = stable_score;
+                            face->is_recognized = true;
+
                             if (!tf->is_confirmed) {
                                 tf->is_confirmed = true;
-                                strncpy(tf->confirmed_id, stable_id, sizeof(tf->confirmed_id) - 1);
+                                strncpy(tf->confirmed_id, stable_name, sizeof(tf->confirmed_id) - 1);
                                 tf->confirmed_score = stable_score;
 
-                                /* Determine crossing direction */
-                                float line_y = (float)frame.height * config.attendance.line_y_ratio;
-                                int cur_side = (tf->cy >= line_y) ? 1 : -1;
-                                const char *dir = crossing_direction(tf->previous_side, cur_side, config.attendance.inside_is_below_line);
-                                if (!dir) dir = "ENTER";
-
+                                char evt_uuid[64] = {0};
                                 int64_t evt_id = attendance_db_create_pending_event(
                                     db,
                                     config.camera.camera_id,
                                     track_id,
-                                    stable_id,
-                                    dir,
-                                    "PENDING_CONFIRMATION",
-                                    stable_score
+                                    stable_name,
+                                    "ABSENSI",
+                                    "CONFIRMED",
+                                    stable_score,
+                                    evt_uuid,
+                                    sizeof(evt_uuid)
                                 );
 
                                 if (evt_id > 0) {
                                     snprintf(last_event_msg, sizeof(last_event_msg),
-                                             "[SUCCESS] %s: %s (Score: %.2f)", dir, stable_id, stable_score);
+                                             "[ABSENSI] %s", stable_name);
 
-                                    printf("\n[EVENT DETECTED] ID=%lld | Track=%lld | Employee=%s | Score=%.3f | Dir=%s\n",
-                                           (long long)evt_id, (long long)track_id, stable_id, stable_score, dir);
+                                    printf("\n[ABSENSI] %s terdeteksi (UUID: %s)\n", stable_name, evt_uuid);
 
                                     if (dispatcher) {
-                                        char evt_str[64];
-                                        snprintf(evt_str, sizeof(evt_str), "%lld", (long long)evt_id);
                                         backend_dispatcher_dispatch_checkin(
                                             dispatcher,
-                                            stable_id,
+                                            stable_name,
                                             stable_score,
                                             config.camera.camera_id,
-                                            evt_str,
+                                            evt_uuid,
                                             NULL
                                         );
                                     }
                                 }
-                                tf->previous_side = cur_side;
                             }
+                        } else if (tf->is_confirmed && tf->confirmed_id[0] != '\0') {
+                            strncpy(face->matched_name, tf->confirmed_id, sizeof(face->matched_name) - 1);
+                            face->match_score = tf->confirmed_score;
+                            face->is_recognized = true;
                         }
                         break;
                     }
@@ -229,15 +255,31 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Render to native Windows GUI Window */
+        for (int i = 0; i < num_faces; i++) {
+            if (!faces[i].is_recognized || faces[i].matched_name[0] == '\0') continue;
+            for (int j = i + 1; j < num_faces; j++) {
+                if (!faces[j].is_recognized || faces[j].matched_name[0] == '\0') continue;
+                if (strcmp(faces[i].matched_name, faces[j].matched_name) == 0) {
+                    if (faces[i].match_score >= faces[j].match_score) {
+                        faces[j].is_recognized = false;
+                        faces[j].matched_name[0] = '\0';
+                    } else {
+                        faces[i].is_recognized = false;
+                        faces[i].matched_name[0] = '\0';
+                        break;
+                    }
+                }
+            }
+        }
+
+
+
         if (win) {
             gui_window_render(
                 win,
                 &frame,
                 faces,
                 num_faces,
-                &tracker,
-                config.attendance.line_y_ratio,
                 (float)current_fps,
                 (float)inference_ms,
                 last_event_msg
@@ -245,19 +287,28 @@ int main(int argc, char **argv) {
         }
 
 #ifdef _WIN32
-        Sleep(25);
+        Sleep(2);
 #else
-        usleep(25000);
+        usleep(2000);
 #endif
     }
 
     printf("\n[Shutdown] Cleaning up resources...\n");
+    if (frame.data) free(frame.data);
     if (win) gui_window_destroy(win);
     if (cap) video_capture_close(cap);
     if (dispatcher) backend_dispatcher_destroy(dispatcher);
     face_engine_destroy(face_engine);
     face_matcher_destroy(matcher);
     attendance_db_close(db);
+
+
+#ifdef _WIN32
+    if (h_instance_mutex) {
+        ReleaseMutex(h_instance_mutex);
+        CloseHandle(h_instance_mutex);
+    }
+#endif
 
     printf("[Shutdown] AI-Recognition engine exited cleanly.\n");
     return 0;
