@@ -573,7 +573,7 @@ def main():
         fps_counter += 1
 
         if frame.shape[1] != target_width or frame.shape[0] != target_height:
-            frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+            frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_NEAREST)
 
         # Trigger background face detection every 2 frames
         if frame_counter % 2 == 0:
@@ -667,11 +667,13 @@ def main():
             frame_to_serve = frame
 
         # Encode composite frame to JPEG for HTTP clients (100% pixel-synced with Desktop GUI)
-        ret_enc, jpeg_bytes = cv2.imencode(".jpg", frame_to_serve, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if ret_enc:
-            with jpeg_cond:
-                latest_jpeg_frame = jpeg_bytes.tobytes()
-                jpeg_cond.notify_all()
+        # Throttled to every 2nd frame at 50% quality to save CPU overhead
+        if frame_counter % 2 == 0:
+            ret_enc, jpeg_bytes = cv2.imencode(".jpg", frame_to_serve, [cv2.IMWRITE_JPEG_QUALITY, 50])
+            if ret_enc:
+                with jpeg_cond:
+                    latest_jpeg_frame = jpeg_bytes.tobytes()
+                    jpeg_cond.notify_all()
 
         # Brief yield to keep CPU healthy while maintaining high frame rate
         time.sleep(0.005)
