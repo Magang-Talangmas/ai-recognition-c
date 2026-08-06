@@ -94,6 +94,7 @@ class ZeroLatencyRTSPCapture:
                     if ret and frame is not None:
                         with self.lock:
                             self.latest_frame = frame
+                            self.new_frame_available = True
                 else:
                     time.sleep(0.005)
                     if self.cap is None or not self.cap.isOpened():
@@ -105,8 +106,10 @@ class ZeroLatencyRTSPCapture:
     def read_fresh(self):
         with self.lock:
             if self.latest_frame is not None:
-                return True, self.latest_frame.copy()
-            return False, None
+                is_new = getattr(self, 'new_frame_available', False)
+                self.new_frame_available = False
+                return True, self.latest_frame.copy(), is_new
+            return False, None, False
 
     def release(self):
         self.running = False
@@ -152,6 +155,40 @@ class AsyncFaceDetector:
                         self.latest_faces = detected
                 except Exception:
                     pass
+            else:
+                time.sleep(0.005)
+
+class AsyncJPEGEncoder:
+    """Decoupled background JPEG encoder to prevent main loop FPS drops."""
+    def __init__(self):
+        import cv2
+        self.cv2 = cv2
+        self.pending_frame = None
+        self.lock = threading.Lock()
+        self.running = True
+        self.thread = threading.Thread(target=self._encode_loop, daemon=True)
+        self.thread.start()
+
+    def submit_frame(self, frame):
+        with self.lock:
+            self.pending_frame = frame
+
+    def _encode_loop(self):
+        global latest_jpeg_frame, jpeg_cond
+        while self.running:
+            frame_to_process = None
+            with self.lock:
+                if self.pending_frame is not None:
+                    frame_to_process = self.pending_frame
+                    self.pending_frame = None
+            
+            if frame_to_process is not None:
+                ret_enc, jpeg_bytes = self.cv2.imencode(".jpg", frame_to_process, [self.cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ret_enc:
+                    with jpeg_cond:
+                        latest_jpeg_frame = jpeg_bytes.tobytes()
+                        jpeg_cond.notify_all()
+                time.sleep(0.033) # Throttle encoding to max ~30 FPS to prevent browser flickering
             else:
                 time.sleep(0.005)
 
@@ -452,6 +489,7 @@ def main():
 
     capture = ZeroLatencyRTSPCapture(source)
     detector = AsyncFaceDetector(face_engine)
+    jpeg_encoder = AsyncJPEGEncoder()
 
     stream_stats["camera_source"] = str(source)
     stream_stats["resolution"] = f"{target_width + 340}x{target_height}"
@@ -462,9 +500,10 @@ def main():
     current_fps = 0.0
 
     shm = None
+    last_shm_frame = None
 
     while True:
-        ret, frame = capture.read_fresh()
+        ret, frame, is_new_frame = capture.read_fresh()
         if not ret or frame is None:
             time.sleep(0.005)
             continue
@@ -494,8 +533,8 @@ def main():
                 getattr(f, 'person_name', 'Unknown') for f in faces if getattr(f, 'person_name', None)
             ]
         
-        # Write binary stream to C engine if pipe is attached
-        if is_piped:
+        # Write binary stream to C engine if pipe is attached (ONLY ON NEW FRAMES to prevent pipe blocking)
+        if is_piped and is_new_frame:
             try:
                 # Build packet header: uint32 magic, uint32 width, uint32 height, uint32 num_faces
                 header = struct.pack("<IIII", MAGIC, target_width, target_height, num_faces)
@@ -552,22 +591,22 @@ def main():
                         raw_bytes = shm.read(shm_w * shm_h * 3)
                         if len(raw_bytes) == shm_w * shm_h * 3:
                             frame_to_serve = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((shm_h, shm_w, 3))
+                            last_shm_frame = frame_to_serve
             except Exception:
-                shm = None
+                pass # Do not reset shm to None on temporary read errors
 
-        # Fallback to camera frame if C preview is initializing
+        # Fallback to last successful C preview frame, or camera frame if starting up
         if frame_to_serve is None:
-            frame_to_serve = frame
+            if last_shm_frame is not None:
+                frame_to_serve = last_shm_frame
+            else:
+                frame_to_serve = frame
 
-        # Encode composite frame to JPEG for HTTP clients (100% pixel-synced with Desktop GUI)
-        ret_enc, jpeg_bytes = cv2.imencode(".jpg", frame_to_serve, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if ret_enc:
-            with jpeg_cond:
-                latest_jpeg_frame = jpeg_bytes.tobytes()
-                jpeg_cond.notify_all()
+        # Submit composite frame to background JPEG encoder for HTTP clients (Zero block to main loop)
+        jpeg_encoder.submit_frame(frame_to_serve)
 
         # Brief yield to keep CPU healthy while maintaining high frame rate
-        time.sleep(0.005)
+        time.sleep(0.001)
 
     capture.release()
 
