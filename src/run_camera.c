@@ -4,13 +4,11 @@
 #include <stdbool.h>
 
 #include "attendance/config.h"
-#include "attendance/database.h"
 #include "attendance/face_engine.h"
 #include "attendance/matcher.h"
 #include "attendance/vision_utils.h"
 #include "attendance/api_dispatcher.h"
 #include "attendance/gui_preview.h"
-#include "attendance/video_capture.h"
 #include "attendance/video_capture.h"
 
 
@@ -59,25 +57,12 @@ int main(int argc, char **argv) {
     }
     config_print(&config);
 
-    /* Open Local Event Database */
-    AttendanceDB *db = attendance_db_open(
-        config.attendance.event_database,
-        config.attendance.duplicate_cooldown_seconds
-    );
-    if (!db) {
-        fprintf(stderr, "[Error] Failed to initialize SQLite database '%s'\n", config.attendance.event_database);
-#ifdef _WIN32
-        if (h_instance_mutex) { ReleaseMutex(h_instance_mutex); CloseHandle(h_instance_mutex); }
-#endif
-        return 1;
-    }
-    printf("[Init] Local SQLite database connected: %s\n", config.attendance.event_database);
+
 
     /* Load Enrolled Face Templates */
     FaceMatcher *matcher = face_matcher_create(config.attendance.embedding_file, &config.face);
     if (!matcher) {
         fprintf(stderr, "[Error] Failed to initialize FaceMatcher.\n");
-        attendance_db_close(db);
 #ifdef _WIN32
         if (h_instance_mutex) { ReleaseMutex(h_instance_mutex); CloseHandle(h_instance_mutex); }
 #endif
@@ -89,7 +74,6 @@ int main(int argc, char **argv) {
     if (!face_engine) {
         fprintf(stderr, "[Error] Failed to initialize FaceEngine.\n");
         face_matcher_destroy(matcher);
-        attendance_db_close(db);
 #ifdef _WIN32
         if (h_instance_mutex) { ReleaseMutex(h_instance_mutex); CloseHandle(h_instance_mutex); }
 #endif
@@ -214,34 +198,22 @@ int main(int argc, char **argv) {
                                 tf->confirmed_score = stable_score;
 
                                 char evt_uuid[64] = {0};
-                                int64_t evt_id = attendance_db_create_pending_event(
-                                    db,
-                                    config.camera.camera_id,
-                                    track_id,
-                                    stable_name,
-                                    "ABSENSI",
-                                    "CONFIRMED",
-                                    stable_score,
-                                    evt_uuid,
-                                    sizeof(evt_uuid)
-                                );
+                                attendance_generate_uuid_v4(evt_uuid, sizeof(evt_uuid));
 
-                                if (evt_id > 0) {
-                                    snprintf(last_event_msg, sizeof(last_event_msg),
-                                             "[ABSENSI] %s", stable_name);
+                                snprintf(last_event_msg, sizeof(last_event_msg),
+                                         "[ABSENSI] %s", stable_name);
 
-                                    printf("\n[ABSENSI] %s terdeteksi (UUID: %s)\n", stable_name, evt_uuid);
+                                printf("\n[ABSENSI] %s terdeteksi (UUID: %s)\n", stable_name, evt_uuid);
 
-                                    if (dispatcher) {
-                                        backend_dispatcher_dispatch_checkin(
-                                            dispatcher,
-                                            stable_name,
-                                            stable_score,
-                                            config.camera.camera_id,
-                                            evt_uuid,
-                                            NULL
-                                        );
-                                    }
+                                if (dispatcher) {
+                                    backend_dispatcher_dispatch_checkin(
+                                        dispatcher,
+                                        stable_name,
+                                        stable_score,
+                                        config.camera.camera_id,
+                                        evt_uuid,
+                                        NULL
+                                    );
                                 }
                             }
                         } else if (tf->is_confirmed && tf->confirmed_id[0] != '\0') {
@@ -300,7 +272,6 @@ int main(int argc, char **argv) {
     if (dispatcher) backend_dispatcher_destroy(dispatcher);
     face_engine_destroy(face_engine);
     face_matcher_destroy(matcher);
-    attendance_db_close(db);
 
 
 #ifdef _WIN32

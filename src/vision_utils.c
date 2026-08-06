@@ -8,6 +8,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <objbase.h>
 #else
 #include <sys/time.h>
 #endif
@@ -40,6 +41,39 @@ void get_iso8601_timestamp(char *buf, size_t buf_size) {
     gmtime_r(&now, &tm_utc);
 #endif
     strftime(buf, buf_size, "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+}
+
+void attendance_generate_uuid_v4(char *out_uuid, size_t max_len) {
+    if (!out_uuid || max_len < 37) return;
+
+#ifdef _WIN32
+    GUID guid;
+    if (SUCCEEDED(CoCreateGuid(&guid))) {
+        snprintf(out_uuid, max_len,
+                 "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                 (unsigned long)guid.Data1,
+                 (unsigned int)guid.Data2,
+                 (unsigned int)guid.Data3,
+                 guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+                 guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+        return;
+    }
+#endif
+
+    /* Portable fallback random UUID v4 */
+    uint8_t bytes[16];
+    for (int i = 0; i < 16; i++) {
+        bytes[i] = (uint8_t)(rand() & 0xFF);
+    }
+    bytes[6] = (bytes[6] & 0x0F) | 0x40; /* Version 4 */
+    bytes[8] = (bytes[8] & 0x3F) | 0x80; /* Variant 1 */
+    snprintf(out_uuid, max_len,
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             bytes[0], bytes[1], bytes[2], bytes[3],
+             bytes[4], bytes[5],
+             bytes[6], bytes[7],
+             bytes[8], bytes[9],
+             bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
 }
 
 void centroid_tracker_init(CentroidTracker *tracker, float max_dist) {

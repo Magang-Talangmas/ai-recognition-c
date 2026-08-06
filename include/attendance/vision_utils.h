@@ -81,6 +81,9 @@ double get_monotonic_time_seconds(void);
 /* Current UTC ISO8601 timestamp string (e.g. 2026-08-05T01:45:00Z) */
 void get_iso8601_timestamp(char *buf, size_t buf_size);
 
+/* Generate a compliant UUID v4 string (36 chars + null terminator) */
+void attendance_generate_uuid_v4(char *out_uuid, size_t max_len);
+
 #ifdef __cplusplus
 }
 #endif

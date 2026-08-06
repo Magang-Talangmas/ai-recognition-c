@@ -280,8 +280,8 @@ void config_print(const AppConfig *cfg) {
     printf("       match_thresh: %.2f | margin: %.2f | votes: %d/%d\n",
            cfg->face.match_threshold, cfg->face.match_margin,
            cfg->face.votes_required, cfg->face.vote_window);
-    printf("[Attendance] db: %s | embeddings: %s | cooldown: %ds\n",
-           cfg->attendance.event_database, cfg->attendance.embedding_file,
+    printf("[Attendance] embeddings: %s | cooldown: %ds\n",
+           cfg->attendance.embedding_file,
            cfg->attendance.duplicate_cooldown_seconds);
     printf("[Backend] enabled: %s | URL: %s\n",
            cfg->backend.enabled ? "true" : "false", cfg->backend.api_url);

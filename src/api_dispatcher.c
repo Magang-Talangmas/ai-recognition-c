@@ -1,5 +1,4 @@
 #include "attendance/api_dispatcher.h"
-#include "attendance/database.h"
 #include "attendance/vision_utils.h"
 #include "third_party/cJSON.h"
 

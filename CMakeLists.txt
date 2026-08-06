@@ -12,7 +12,6 @@ include_directories(
 # Core Library Sources
 set(CORE_SOURCES
     src/config.c
-    src/database.c
     src/face_engine.c
     src/matcher.c
     src/vision_utils.c
@@ -22,29 +21,8 @@ set(CORE_SOURCES
     src/third_party/cJSON.c
 )
 
-# Check for SQLite3
-find_package(SQLite3 QUIET)
-if (SQLite3_FOUND)
-    include_directories(${SQLite3_INCLUDE_DIRS})
-    set(SQLITE3_LIBS ${SQLite3_LIBRARIES})
-else()
-    # Check if local sqlite3.c is in third_party
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/sqlite3.c")
-        list(APPEND CORE_SOURCES src/third_party/sqlite3.c)
-        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/third_party)
-        set(SQLITE3_LIBS "")
-    else()
-        find_library(SQLITE3_LIB sqlite3)
-        if (SQLITE3_LIB)
-            set(SQLITE3_LIBS ${SQLITE3_LIB})
-        else()
-            set(SQLITE3_LIBS sqlite3)
-        endif()
-    endif()
-endif()
-
 # System Libraries
-set(EXTRA_LIBS ${SQLITE3_LIBS})
+set(EXTRA_LIBS "")
 if (WIN32)
     list(APPEND EXTRA_LIBS winhttp ws2_32 gdi32 user32 ole32)
 else()
@@ -60,9 +38,6 @@ target_link_libraries(run_camera attendance_core)
 
 add_executable(enroll_employee src/enroll_employee.c)
 target_link_libraries(enroll_employee attendance_core)
-
-add_executable(respond_event src/respond_event.c)
-target_link_libraries(respond_event attendance_core)
 
 add_executable(export_embeddings src/export_embeddings.c)
 target_link_libraries(export_embeddings attendance_core)

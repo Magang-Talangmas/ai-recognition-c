@@ -5,7 +5,6 @@
 #include <assert.h>
 
 #include "attendance/config.h"
-#include "attendance/database.h"
 #include "attendance/face_engine.h"
 #include "attendance/matcher.h"
 #include "attendance/vision_utils.h"
@@ -143,63 +142,43 @@ static void test_vision_tracking_and_voting(void) {
     ASSERT_TRUE(dir_out && strcmp(dir_out, "EXIT") == 0, "Crossing bottom to top is EXIT");
 }
 
-static void test_sqlite_database(void) {
-    printf("\n=== TEST 4: SQLite Database Event Lifecycle with UUID v4 ===\n");
+static void test_uuid_and_backend_payload(void) {
+    printf("\n=== TEST 4: UUID v4 Generation & Backend JSON Payload ===\n");
 
-    const char *test_db_file = "test_attendance.db";
-    remove(test_db_file);
+    char uuid1[64] = {0};
+    char uuid2[64] = {0};
+    attendance_generate_uuid_v4(uuid1, sizeof(uuid1));
+    attendance_generate_uuid_v4(uuid2, sizeof(uuid2));
 
-    AttendanceDB *db = attendance_db_open(test_db_file, 5);
-    ASSERT_TRUE(db != NULL, "Opened test SQLite database");
+    ASSERT_TRUE(strlen(uuid1) == 36, "Generated valid 36-char UUID v4 string");
+    ASSERT_TRUE(strlen(uuid2) == 36, "Generated second 36-char UUID v4 string");
+    ASSERT_TRUE(strcmp(uuid1, uuid2) != 0, "Two generated UUIDs are unique");
+    ASSERT_TRUE(uuid1[8] == '-' && uuid1[13] == '-' && uuid1[18] == '-' && uuid1[23] == '-', "UUID has standard hyphen format");
 
-    char evt_uuid[64] = {0};
-    int64_t ev_id = attendance_db_create_pending_event(
-        db,
-        "test-cam",
-        1001,
-        "EMP-999",
-        "ENTER",
-        "PENDING_CONFIRMATION",
-        0.88f,
-        evt_uuid,
-        sizeof(evt_uuid)
-    );
-    ASSERT_TRUE(ev_id > 0, "Created PENDING_CONFIRMATION attendance event");
-    ASSERT_TRUE(strlen(evt_uuid) == 36, "Generated valid 36-char UUID v4 for event");
+    /* Test Backend Payload JSON construction */
+    char ts[64] = {0};
+    get_iso8601_timestamp(ts, sizeof(ts));
+    ASSERT_TRUE(strlen(ts) > 10, "Generated ISO8601 timestamp");
 
-    /* Check duplicate suppression */
-    char dup_uuid[64] = {0};
-    int64_t dup_id = attendance_db_create_pending_event(
-        db,
-        "test-cam",
-        1001,
-        "EMP-999",
-        "ENTER",
-        "PENDING_CONFIRMATION",
-        0.89f,
-        dup_uuid,
-        sizeof(dup_uuid)
-    );
-    ASSERT_TRUE(dup_id == -1, "Duplicate event within cooldown properly suppressed");
+    cJSON *payload = cJSON_CreateObject();
+    cJSON_AddStringToObject(payload, "event_id", uuid1);
+    cJSON_AddStringToObject(payload, "employee_id", "sabrinaAskaAmalina");
+    cJSON_AddStringToObject(payload, "event_type", "CHECK_IN");
+    cJSON_AddNumberToObject(payload, "similarity", 0.965);
+    cJSON_AddStringToObject(payload, "detected_at", ts);
+    cJSON_AddStringToObject(payload, "camera_id", "main-entrance");
 
-    /* List events */
-    AttendanceEvent events[10];
-    int count = attendance_db_list_events(db, events, 10);
-    ASSERT_TRUE(count == 1, "Listed 1 event from database");
-    ASSERT_TRUE(strcmp(events[0].employee_id, "EMP-999") == 0, "Retrieved employee_id matches");
-    ASSERT_TRUE(strcmp(events[0].event_id, evt_uuid) == 0, "Retrieved event_id matches generated UUID");
-    ASSERT_TRUE(strcmp(events[0].status, "PENDING_CONFIRMATION") == 0, "Initial status is PENDING_CONFIRMATION");
+    char *json_str = cJSON_PrintUnformatted(payload);
+    ASSERT_TRUE(json_str != NULL, "Constructed backend JSON payload");
 
-    /* Respond with confirmation */
-    int resp_rc = attendance_db_respond(db, ev_id, "confirm");
-    ASSERT_TRUE(resp_rc == 0, "Responded to event with 'confirm'");
+    cJSON *parsed = cJSON_Parse(json_str);
+    ASSERT_TRUE(parsed != NULL, "Parsed backend JSON payload");
+    cJSON *eid = cJSON_GetObjectItem(parsed, "event_id");
+    ASSERT_TRUE(eid && strcmp(eid->valuestring, uuid1) == 0, "Payload event_id matches generated UUID");
 
-    count = attendance_db_list_events(db, events, 10);
-    ASSERT_TRUE(strcmp(events[0].status, "CONFIRMED") == 0, "Status updated to CONFIRMED");
-    ASSERT_TRUE(strcmp(events[0].event_type, "CHECK_IN") == 0, "Event type resolved to CHECK_IN");
-
-    attendance_db_close(db);
-    remove(test_db_file);
+    cJSON_Delete(parsed);
+    cJSON_Delete(payload);
+    free(json_str);
 }
 
 static void test_json(void) {
@@ -232,7 +211,7 @@ int main(void) {
     test_matcher_and_normalization();
     test_embedding_validation();
     test_vision_tracking_and_voting();
-    test_sqlite_database();
+    test_uuid_and_backend_payload();
     test_json();
 
     printf("\n=================================================================\n");
