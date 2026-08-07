@@ -882,6 +882,7 @@ def main():
         nonlocal latest_camera_frame
         global latest_jpeg_frame, jpeg_cond
         shm_local = None
+        shm_mutex = None
         last_valid_frame = None
         
         while True:
@@ -895,6 +896,25 @@ def main():
                     shm_local = None
 
             if shm_local is not None:
+                acquired = False
+                if shm_mutex is None:
+                    try:
+                        import ctypes
+                        # OpenMutexA(SYNCHRONIZE=0x00100000, False, "Local\\TMAS_SHM_MUTEX")
+                        shm_mutex = ctypes.windll.kernel32.OpenMutexA(0x00100000, False, b"Local\\TMAS_SHM_MUTEX")
+                    except Exception:
+                        shm_mutex = None
+
+                if shm_mutex:
+                    try:
+                        import ctypes
+                        # WaitForSingleObject(hMutex, 10ms)
+                        res = ctypes.windll.kernel32.WaitForSingleObject(shm_mutex, 10)
+                        if res == 0 or res == 0x00000080: # WAIT_OBJECT_0 (0) or WAIT_ABANDONED (0x80)
+                            acquired = True
+                    except Exception:
+                        acquired = False
+
                 try:
                     shm_local.seek(0)
                     hdr = shm_local.read(24)
@@ -907,6 +927,13 @@ def main():
                                 last_valid_frame = frame_to_serve
                 except Exception:
                     shm_local = None
+                finally:
+                    if acquired and shm_mutex:
+                        try:
+                            import ctypes
+                            ctypes.windll.kernel32.ReleaseMutex(shm_mutex)
+                        except Exception:
+                            pass
 
             if frame_to_serve is None:
                 if last_valid_frame is not None:

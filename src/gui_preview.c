@@ -145,6 +145,7 @@ struct GuiWindow {
     HBITMAP hbm_mem;
     HBITMAP hbm_old;
     HANDLE h_shm_map;
+    HANDLE h_shm_mutex;
     uint8_t *shm_ptr;
     HFONT font_regular;
     HFONT font_bold;
@@ -270,7 +271,8 @@ GuiWindow *gui_window_create(const char *title, int width, int height) {
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI"
     );
 
-    /* Setup Shared Memory for zero-latency Web/Mobile Live Streaming */
+    /* Setup Shared Memory & Named Mutex for zero-latency Web/Mobile Live Streaming */
+    win->h_shm_mutex = CreateMutexA(NULL, FALSE, "Local\\TMAS_SHM_MUTEX");
     win->h_shm_map = CreateFileMappingA(
         INVALID_HANDLE_VALUE,
         NULL,
@@ -305,6 +307,10 @@ void gui_window_destroy(GuiWindow *win) {
     if (win->h_shm_map) {
         CloseHandle(win->h_shm_map);
         win->h_shm_map = NULL;
+    }
+    if (win->h_shm_mutex) {
+        CloseHandle(win->h_shm_mutex);
+        win->h_shm_mutex = NULL;
     }
 
     if (win->hdc_mem) {
@@ -493,6 +499,10 @@ void gui_window_render(
 
     /* 4. Export Fixed Canonical 1280x720 Frame to Shared Memory for Web & Mobile */
     if (win->shm_ptr) {
+        if (win->h_shm_mutex) {
+            WaitForSingleObject(win->h_shm_mutex, 10);
+        }
+
         uint32_t *hdr32 = (uint32_t *)win->shm_ptr;
         hdr32[0] = 0; /* Temporarily invalidate header while GetDIBits writes pixels */
 
@@ -515,6 +525,10 @@ void gui_window_render(
         hdr32[3] = 3;
         (*hdr64)++;
         hdr32[0] = 0x53414D54; /* 'TMAS' magic - validate after write completes */
+
+        if (win->h_shm_mutex) {
+            ReleaseMutex(win->h_shm_mutex);
+        }
     }
 
     /* 5. Letterbox / Pillarbox Scale to Desktop Window Client Area */
