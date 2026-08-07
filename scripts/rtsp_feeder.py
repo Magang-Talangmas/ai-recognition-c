@@ -462,11 +462,12 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-            self.send_header("Cache-Control", "no-cache, private")
+            self.send_header("Cache-Control", "no-cache, private, no-store, must-revalidate")
             self.send_header("Pragma", "no-cache")
             self.end_headers()
 
             last_frame_bytes = None
+            first_frame = True
             while True:
                 with jpeg_cond:
                     if latest_jpeg_frame is last_frame_bytes or latest_jpeg_frame is None:
@@ -475,8 +476,10 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
 
                 if frame_bytes is not None and frame_bytes is not last_frame_bytes:
                     try:
-                        header = f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(frame_bytes)}\r\n\r\n".encode("ascii")
-                        self.wfile.write(header + frame_bytes + b"\r\n")
+                        prefix = b"--frame\r\n" if first_frame else b"\r\n--frame\r\n"
+                        first_frame = False
+                        header = prefix + f"Content-Type: image/jpeg\r\nContent-Length: {len(frame_bytes)}\r\n\r\n".encode("ascii")
+                        self.wfile.write(header + frame_bytes)
                         self.wfile.flush()
                         last_frame_bytes = frame_bytes
                     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
