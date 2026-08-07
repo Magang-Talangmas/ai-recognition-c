@@ -944,13 +944,10 @@ def main():
         with frame_lock:
             latest_camera_frame = frame
 
-        # Synchronous face detection to guarantee perfectly aligned bounding boxes
-        # The background capture thread will automatically drop skipped frames
-        try:
-            faces = face_engine.detect(frame)
-        except Exception as err:
-            sys.stderr.write(f"[Feeder] Error in face detection: {err}\n")
-            faces = []
+        # Asynchronous decoupled face detection: submit frame to AI background worker
+        # Main video loop continues at full 30-60 FPS throughput without waiting
+        detector.submit_frame(frame)
+        faces = detector.get_faces()
         num_faces = min(len(faces), 16)
 
         # Calculate FPS
