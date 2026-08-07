@@ -469,8 +469,8 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
             last_frame_bytes = None
             while True:
                 with jpeg_cond:
-                    while latest_jpeg_frame is last_frame_bytes or latest_jpeg_frame is None:
-                        jpeg_cond.wait(timeout=0.2)
+                    if latest_jpeg_frame is last_frame_bytes or latest_jpeg_frame is None:
+                        jpeg_cond.wait(timeout=0.033)
                     frame_bytes = latest_jpeg_frame
 
                 if frame_bytes is not None and frame_bytes is not last_frame_bytes:
@@ -879,11 +879,10 @@ def main():
         nonlocal latest_camera_frame
         global latest_jpeg_frame, jpeg_cond
         shm_local = None
-        last_seq = 0
+        last_valid_frame = None
         
         while True:
             frame_to_serve = None
-            is_new_frame = False
 
             if shm_local is None:
                 try:
@@ -899,22 +898,23 @@ def main():
                     if len(hdr) == 24:
                         magic, shm_w, shm_h, shm_c, seq = struct.unpack("<IIIIQ", hdr)
                         if magic == 0x53414D54 and 0 < shm_w <= 3840 and 0 < shm_h <= 2160 and shm_c == 3:
-                            if seq != last_seq:
-                                raw_bytes = shm_local.read(shm_w * shm_h * 3)
-                                if len(raw_bytes) == shm_w * shm_h * 3:
-                                    frame_to_serve = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((shm_h, shm_w, 3))
-                                    last_seq = seq
-                                    is_new_frame = True
+                            raw_bytes = shm_local.read(shm_w * shm_h * 3)
+                            if len(raw_bytes) == shm_w * shm_h * 3:
+                                frame_to_serve = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((shm_h, shm_w, 3))
+                                last_valid_frame = frame_to_serve
                 except Exception:
                     shm_local = None
 
-            if not is_new_frame and last_seq == 0:
-                with frame_lock:
-                    if latest_camera_frame is not None:
-                        frame_to_serve = latest_camera_frame.copy()
-                        is_new_frame = True
+            if frame_to_serve is None:
+                if last_valid_frame is not None:
+                    frame_to_serve = last_valid_frame
+                else:
+                    with frame_lock:
+                        if latest_camera_frame is not None:
+                            frame_to_serve = latest_camera_frame.copy()
+                            last_valid_frame = frame_to_serve
 
-            if is_new_frame and frame_to_serve is not None:
+            if frame_to_serve is not None:
                 try:
                     ret_enc, jpeg_bytes = cv2.imencode(".jpg", frame_to_serve, [cv2.IMWRITE_JPEG_QUALITY, 65])
                     if ret_enc:
@@ -924,7 +924,7 @@ def main():
                 except Exception:
                     pass
 
-            time.sleep(0.010)
+            time.sleep(0.033)
 
     encoder_thread = threading.Thread(target=mjpeg_encoder_worker, daemon=True)
     encoder_thread.start()
