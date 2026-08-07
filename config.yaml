@@ -14,8 +14,7 @@ person_detection:
 face:
   model_pack: "buffalo_l"
   model_root: ".insightface"
-  backend: "openvino"
-  openvino_device: "AUTO"
+  backend: "onnx"
   detection_size: 640
   detection_threshold: 0.50
   min_face_size: 10

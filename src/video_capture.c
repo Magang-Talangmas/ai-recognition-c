@@ -73,9 +73,23 @@ VideoCapture *video_capture_open(const char *source, int target_width, int targe
     }
 
     const char *py = find_python_executable();
+    const char *script_candidates[] = {
+        "scripts\\rtsp_feeder.py",
+        "scripts/rtsp_feeder.py",
+        "..\\scripts\\rtsp_feeder.py",
+        "../scripts/rtsp_feeder.py",
+        "camera-c\\scripts\\rtsp_feeder.py",
+        "camera-c/scripts/rtsp_feeder.py",
+        "D:\\kamera\\camera-c\\scripts\\rtsp_feeder.py",
+        "D:/kamera/camera-c/scripts/rtsp_feeder.py",
+        NULL
+    };
     const char *script_path = "scripts\\rtsp_feeder.py";
-    if (GetFileAttributesA(script_path) == INVALID_FILE_ATTRIBUTES) {
-        script_path = "camera-c\\scripts\\rtsp_feeder.py";
+    for (int i = 0; script_candidates[i] != NULL; i++) {
+        if (GetFileAttributesA(script_candidates[i]) != INVALID_FILE_ATTRIBUTES) {
+            script_path = script_candidates[i];
+            break;
+        }
     }
 
     char cmdline[2048];

@@ -143,8 +143,7 @@ static void set_default_config(AppConfig *cfg) {
     /* Face defaults */
     snprintf(cfg->face.model_pack, sizeof(cfg->face.model_pack), "buffalo_l");
     snprintf(cfg->face.model_root, sizeof(cfg->face.model_root), ".insightface");
-    snprintf(cfg->face.backend, sizeof(cfg->face.backend), "openvino");
-    snprintf(cfg->face.openvino_device, sizeof(cfg->face.openvino_device), "AUTO");
+    snprintf(cfg->face.backend, sizeof(cfg->face.backend), "onnx");
     cfg->face.detection_size = 640;
     cfg->face.detection_threshold = 0.50f;
     cfg->face.min_face_size = 10;
@@ -174,10 +173,24 @@ int config_load(const char *config_path, AppConfig *config) {
     set_default_config(config);
     config_load_dotenv(".env");
 
-    const char *path = config_path ? config_path : "config.yaml";
-    FILE *f = fopen(path, "r");
+    const char *candidates[] = {
+        config_path,
+        "config.yaml",
+        "../config.yaml",
+        "camera-c/config.yaml",
+        "D:/kamera/camera-c/config.yaml",
+        "D:\\kamera\\camera-c\\config.yaml",
+        NULL
+    };
+
+    FILE *f = NULL;
+    for (int i = 0; candidates[i] != NULL; i++) {
+        if (strlen(candidates[i]) == 0) continue;
+        f = fopen(candidates[i], "r");
+        if (f) break;
+    }
+
     if (!f) {
-        /* Fallback check in current directory */
         return 0;
     }
 
@@ -235,7 +248,7 @@ int config_load(const char *config_path, AppConfig *config) {
             if (strcmp(key, "model_pack") == 0 && val[0]) strncpy(config->face.model_pack, val, sizeof(config->face.model_pack) - 1);
             else if (strcmp(key, "model_root") == 0 && val[0]) strncpy(config->face.model_root, val, sizeof(config->face.model_root) - 1);
             else if (strcmp(key, "backend") == 0 && val[0]) strncpy(config->face.backend, val, sizeof(config->face.backend) - 1);
-            else if (strcmp(key, "openvino_device") == 0 && val[0]) strncpy(config->face.openvino_device, val, sizeof(config->face.openvino_device) - 1);
+
             else if (strcmp(key, "detection_size") == 0 && val[0]) config->face.detection_size = atoi(val);
             else if (strcmp(key, "detection_threshold") == 0 && val[0]) config->face.detection_threshold = (float)atof(val);
             else if (strcmp(key, "min_face_size") == 0 && val[0]) config->face.min_face_size = atoi(val);
@@ -275,8 +288,8 @@ void config_print(const AppConfig *cfg) {
            cfg->camera.source,
            cfg->camera.process_every_n_frames,
            cfg->camera.show_preview ? "true" : "false");
-    printf("[Face] backend: %s | device: %s | size: %d | det_thresh: %.2f\n",
-           cfg->face.backend, cfg->face.openvino_device,
+    printf("[Face] backend: %s | size: %d | det_thresh: %.2f\n",
+           cfg->face.backend,
            cfg->face.detection_size, cfg->face.detection_threshold);
     printf("       match_thresh: %.2f | margin: %.2f | votes: %d/%d\n",
            cfg->face.match_threshold, cfg->face.match_margin,
