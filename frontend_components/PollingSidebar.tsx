@@ -48,7 +48,7 @@ const PollingSidebar: React.FC = () => {
     fetchDetections();
 
     // Set up polling interval
-    const intervalId = setInterval(fetchDetections, 1000);
+    const intervalId = setInterval(fetchDetections, 100);
 
     // Cleanup on unmount
     return () => {

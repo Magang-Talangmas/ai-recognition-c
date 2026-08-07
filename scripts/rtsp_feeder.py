@@ -31,6 +31,19 @@ binary_stream = os.fdopen(REAL_STDOUT_FD, "wb", buffering=0)
 
 MAGIC = 0x53414D54  # 'TMAS' in little endian
 
+
+def get_iou(bb1, bb2):
+    x_left = max(bb1[0], bb2[0])
+    y_top = max(bb1[1], bb2[1])
+    x_right = min(bb1[2], bb2[2])
+    y_bottom = min(bb1[3], bb2[3])
+    if x_right < x_left or y_bottom < y_top: return 0.0
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+    bb1_area = (bb1[2] - bb1[0]) * (bb1[3] - bb1[1])
+    bb2_area = (bb2[2] - bb2[0]) * (bb2[3] - bb2[1])
+    if bb1_area + bb2_area - intersection_area <= 0: return 0.0
+    return intersection_area / float(bb1_area + bb2_area - intersection_area)
+
 class ZeroLatencyRTSPCapture:
     """Threaded RTSP frame grabber that eliminates buffer accumulation and lag."""
     def __init__(self, source):
@@ -479,7 +492,7 @@ def main():
         class StandaloneInsightFaceEngine:
             def __init__(self, device="CPU"):
                 self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-                self.app.prepare(ctx_id=0, det_size=(640, 640))
+                self.app.prepare(ctx_id=0, det_size=(320, 320))
                 
                 # Load embeddings.bin for matching
                 self.emp_ids = []
@@ -575,11 +588,51 @@ def main():
         if frame.shape[1] != target_width or frame.shape[0] != target_height:
             frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_NEAREST)
 
-        # Trigger background face detection every 2 frames
+        # Trigger background heavy recognition every 2 frames
         if frame_counter % 2 == 0:
             detector.submit_frame(frame)
 
-        faces = detector.get_faces()
+        async_faces = detector.get_faces()
+
+        # Fast synchronous detection for perfect bounding box sync
+        bboxes, kpss = face_engine.app.det_model.detect(frame, max_num=16, metric='default')
+        
+        synced_faces = []
+        if bboxes is not None and bboxes.shape[0] > 0:
+            for i in range(bboxes.shape[0]):
+                bbox = bboxes[i, 0:4]
+                det_score = bboxes[i, 4]
+                
+                class FaceObj: pass
+                f = FaceObj()
+                f.bbox = bbox
+                f.detection_score = float(det_score)
+                f.blur_score = 50.0
+                f.landmarks = kpss[i] if kpss is not None else None
+                f.embedding = __import__('numpy').zeros(512, dtype=__import__('numpy').float32)
+                f.person_id = ''
+                f.person_name = 'Unknown'
+                f.similarity = 0.0
+                
+                # IoU Match with async faces for identity
+                best_iou = 0
+                best_async_face = None
+                for af in async_faces:
+                    iou = get_iou(bbox, getattr(af, 'bbox', [0,0,0,0]))
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_async_face = af
+                
+                if best_iou > 0.3 and best_async_face is not None:
+                    f.person_id = getattr(best_async_face, 'person_id', '')
+                    f.person_name = getattr(best_async_face, 'person_name', 'Unknown')
+                    f.similarity = getattr(best_async_face, 'similarity', 0.0)
+                    if hasattr(best_async_face, 'embedding') and best_async_face.embedding is not None:
+                        f.embedding = best_async_face.embedding
+
+                synced_faces.append(f)
+        
+        faces = synced_faces
         num_faces = min(len(faces), 16)
 
         # Calculate FPS
