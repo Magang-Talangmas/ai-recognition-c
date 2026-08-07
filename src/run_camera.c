@@ -18,6 +18,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <mmsystem.h>
 #else
 #include <unistd.h>
 #endif
@@ -36,10 +37,12 @@ int main(int argc, char **argv) {
 #endif
 
 #ifdef _WIN32
+    timeBeginPeriod(1);
     HANDLE h_instance_mutex = CreateMutexA(NULL, TRUE, "Global\\TMAS_AI_CAMERA_RUNNER_MUTEX");
     if (!h_instance_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
         fprintf(stderr, "[Error] Another instance of AI Camera Runner is already active! Exiting to prevent RTSP conflict.\n");
         if (h_instance_mutex) CloseHandle(h_instance_mutex);
+        timeEndPeriod(1);
         return 1;
     }
 #endif
@@ -166,7 +169,7 @@ int main(int argc, char **argv) {
         }
 
         double t_infer_start = get_monotonic_time_seconds();
-        if (num_faces == 0 && face_engine) {
+        if (!cap && face_engine) {
             num_faces = face_engine_detect(face_engine, &frame, faces, MAX_DETECTED_FACES);
         }
         double inference_ms = (get_monotonic_time_seconds() - t_infer_start) * 1000.0;
@@ -287,9 +290,9 @@ int main(int argc, char **argv) {
         }
 
 #ifdef _WIN32
-        Sleep(2);
+        Sleep(0);
 #else
-        usleep(2000);
+        usleep(1000);
 #endif
     }
 
@@ -302,12 +305,12 @@ int main(int argc, char **argv) {
     face_matcher_destroy(matcher);
     attendance_db_close(db);
 
-
 #ifdef _WIN32
     if (h_instance_mutex) {
         ReleaseMutex(h_instance_mutex);
         CloseHandle(h_instance_mutex);
     }
+    timeEndPeriod(1);
 #endif
 
     printf("[Shutdown] AI-Recognition engine exited cleanly.\n");

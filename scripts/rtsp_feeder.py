@@ -26,13 +26,18 @@ sys.stdout = sys.stderr
 if sys.platform == "win32":
     import msvcrt
     msvcrt.setmode(REAL_STDOUT_FD, os.O_BINARY)
+    try:
+        import ctypes
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
 
 binary_stream = os.fdopen(REAL_STDOUT_FD, "wb", buffering=0)
 
 MAGIC = 0x53414D54  # 'TMAS' in little endian
 
 class ZeroLatencyRTSPCapture:
-    """Threaded RTSP frame grabber that eliminates buffer accumulation and lag."""
+    """Threaded RTSP frame grabber with zero-latency condition variable."""
     def __init__(self, source):
         import cv2
         self.cv2 = cv2
@@ -45,7 +50,9 @@ class ZeroLatencyRTSPCapture:
         
         self.cap = None
         self.latest_frame = None
+        self.frame_seq = 0
         self.lock = threading.Lock()
+        self.cond = threading.Condition(self.lock)
         self.running = True
         self.is_connected = False
         
@@ -94,22 +101,28 @@ class ZeroLatencyRTSPCapture:
                     if ret and frame is not None:
                         with self.lock:
                             self.latest_frame = frame
+                            self.frame_seq += 1
+                            self.cond.notify_all()
                 else:
-                    time.sleep(0.005)
+                    time.sleep(0.001)
                     if self.cap is None or not self.cap.isOpened():
                         self.is_connected = False
             except Exception:
                 self.is_connected = False
-                time.sleep(0.05)
+                time.sleep(0.01)
 
-    def read_fresh(self):
+    def read_fresh(self, last_seq=None, timeout=0.02):
         with self.lock:
+            if last_seq is not None and self.frame_seq == last_seq and self.running:
+                self.cond.wait(timeout=timeout)
             if self.latest_frame is not None:
-                return True, self.latest_frame.copy()
-            return False, None
+                return True, self.latest_frame, self.frame_seq
+            return False, None, 0
 
     def release(self):
         self.running = False
+        with self.lock:
+            self.cond.notify_all()
         if self.cap is not None:
             try:
                 self.cap.release()
@@ -117,12 +130,13 @@ class ZeroLatencyRTSPCapture:
                 pass
 
 class AsyncFaceDetector:
-    """Decoupled background face detector to maintain 30+ FPS stream throughput."""
+    """Decoupled background face detector to maintain 60 FPS stream throughput."""
     def __init__(self, face_engine):
         self.engine = face_engine
         self.pending_frame = None
         self.latest_faces = []
         self.lock = threading.Lock()
+        self.cond = threading.Condition(self.lock)
         self.running = True
         
         if self.engine is not None:
@@ -132,6 +146,7 @@ class AsyncFaceDetector:
     def submit_frame(self, frame):
         with self.lock:
             self.pending_frame = frame
+            self.cond.notify_all()
 
     def get_faces(self):
         with self.lock:
@@ -141,9 +156,12 @@ class AsyncFaceDetector:
         while self.running:
             frame_to_process = None
             with self.lock:
-                if self.pending_frame is not None:
-                    frame_to_process = self.pending_frame
-                    self.pending_frame = None
+                while self.pending_frame is None and self.running:
+                    self.cond.wait(timeout=0.05)
+                if not self.running:
+                    break
+                frame_to_process = self.pending_frame
+                self.pending_frame = None
             
             if frame_to_process is not None and self.engine is not None:
                 try:
@@ -152,8 +170,6 @@ class AsyncFaceDetector:
                         self.latest_faces = detected
                 except Exception:
                     pass
-            else:
-                time.sleep(0.005)
 
 # Global stream buffers and state for Web and Mobile HTTP clients
 latest_jpeg_frame = None
@@ -382,8 +398,8 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
             align-items: center;
             position: relative;
         }}
-        img {{ width: 100%; height: auto; display: block; }}
-        .footer {{
+        img { width: 100%; height: auto; display: block; }
+        .footer {
             padding: 10px 16px;
             display: flex;
             justify-content: space-between;
@@ -392,18 +408,7 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
             color: #64748b;
             background: #0f172a;
             border-top: 1px solid #1e293b;
-        }}
-        .overlay {{
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: rgba(0, 0, 0, 0.6);
-            padding: 10px;
-            border-radius: 8px;
-            color: white;
-            font-size: 14px;
-            z-index: 10;
-        }}
+        }
     </style>
 </head>
 <body>
@@ -417,33 +422,12 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
         </div>
         <div class="video-container">
             <img src="/stream" alt="Live AI Camera Feed" />
-            <div id="detection-overlay" class="overlay">
-                <div>FPS: <span id="fps">0.0</span></div>
-                <div>Detected: <span id="active-names">None</span></div>
-            </div>
         </div>
         <div class="footer">
             <span>Unified Live Feed &bull; Port {stream_stats.get('port', 8088)}</span>
             <span>Talangmas AI Surveillance Gateway</span>
         </div>
     </div>
-    <script>
-        // Auto update every 2 seconds to fetch detection data
-        setInterval(() => {{
-            fetch('http://192.168.77.171:8088/detect')
-                .then(res => res.json())
-                .then(data => {{
-                    document.getElementById('fps').innerText = data.fps || 0;
-                    if (data.active_names && data.active_names.length > 0) {{
-                        document.getElementById('active-names').innerText = data.active_names.join(', ');
-                    }} else {{
-                        document.getElementById('active-names').innerText = 'None';
-                    }}
-                    console.log("Detection data updated:", data);
-                }})
-                .catch(err => console.error('Error fetching /detect:', err));
-        }}, 2000);
-    </script>
 </body>
 </html>"""
             self.wfile.write(html.encode("utf-8"))
@@ -478,8 +462,8 @@ def main():
 
         class StandaloneInsightFaceEngine:
             def __init__(self, device="CPU"):
-                self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-                self.app.prepare(ctx_id=0, det_size=(640, 640))
+                self.app = FaceAnalysis(name="buffalo_l", allowed_modules=['detection', 'recognition'], providers=["CPUExecutionProvider"])
+                self.app.prepare(ctx_id=0, det_size=(480, 480))
                 
                 # Load embeddings.bin for matching
                 self.emp_ids = []
@@ -520,9 +504,7 @@ def main():
                     f.bbox = face.bbox
                     f.detection_score = float(face.det_score)
                     f.blur_score = 50.0
-                    f.landmarks = face.landmark_2d_106
-                    if hasattr(face, 'kps') and face.kps is not None:
-                        f.landmarks = face.kps
+                    f.landmarks = getattr(face, 'kps', None)
                     f.embedding = face.embedding
                     
                     pid, name, sim, is_match = self.match(f.embedding)
@@ -562,12 +544,14 @@ def main():
     current_fps = 0.0
 
     shm = None
+    last_seq = None
 
     while True:
-        ret, frame = capture.read_fresh()
+        ret, frame, frame_seq = capture.read_fresh(last_seq, timeout=0.016)
         if not ret or frame is None:
-            time.sleep(0.005)
+            time.sleep(0.001)
             continue
+        last_seq = frame_seq
 
         frame_counter += 1
         fps_counter += 1

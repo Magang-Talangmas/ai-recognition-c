@@ -173,10 +173,24 @@ int config_load(const char *config_path, AppConfig *config) {
     set_default_config(config);
     config_load_dotenv(".env");
 
-    const char *path = config_path ? config_path : "config.yaml";
-    FILE *f = fopen(path, "r");
+    const char *candidates[] = {
+        config_path,
+        "config.yaml",
+        "../config.yaml",
+        "camera-c/config.yaml",
+        "D:/kamera/camera-c/config.yaml",
+        "D:\\kamera\\camera-c\\config.yaml",
+        NULL
+    };
+
+    FILE *f = NULL;
+    for (int i = 0; candidates[i] != NULL; i++) {
+        if (strlen(candidates[i]) == 0) continue;
+        f = fopen(candidates[i], "r");
+        if (f) break;
+    }
+
     if (!f) {
-        /* Fallback check in current directory */
         return 0;
     }
 
