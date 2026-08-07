@@ -237,6 +237,7 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                 content_length = int(self.headers.get("content-length", 0))
                 body_bytes = self.rfile.read(content_length) if content_length > 0 else b""
                 name = ""
+                old_name = ""
                 employee_id = ""
                 if body_bytes:
                     import json
@@ -244,11 +245,12 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                         data = json.loads(body_bytes.decode("utf-8"))
                         employee_id = data.get("employeeId", "")
                         name = data.get("name", "")
+                        old_name = data.get("oldName", "")
                     except Exception:
                         pass
                 
                 target_name = name if name else employee_id
-                if not target_name:
+                if not target_name and not old_name:
                     self.send_response(400)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
@@ -256,12 +258,22 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                     return
 
                 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                enroll_dir = os.path.join(base_dir, "data", "enroll", target_name)
+                enroll_base = os.path.join(base_dir, "data", "enroll")
                 
                 import shutil
-                if os.path.exists(enroll_dir):
-                    shutil.rmtree(enroll_dir, ignore_errors=True)
-                    sys.stderr.write(f"[Feeder] Deleted enroll directory: {enroll_dir}\n")
+                targets_to_purge = set([t for t in [target_name, old_name, employee_id] if t])
+                deleted_any = False
+                
+                if os.path.exists(enroll_base):
+                    for folder in os.listdir(enroll_base):
+                        folder_path = os.path.join(enroll_base, folder)
+                        if os.path.isdir(folder_path):
+                            for target in targets_to_purge:
+                                if folder.lower() == target.lower() or target.lower() in folder.lower():
+                                    shutil.rmtree(folder_path, ignore_errors=True)
+                                    sys.stderr.write(f"[Feeder] Deleted enroll directory: {folder_path}\n")
+                                    deleted_any = True
+                                    break
 
                 # Re-generate embeddings.bin
                 try:
@@ -301,6 +313,7 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                 body_bytes = self.rfile.read(content_length) if content_length > 0 else b""
 
                 name = ""
+                old_name = ""
                 employee_id = ""
                 photo_urls = []
                 uploaded_files = []
@@ -310,6 +323,7 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                     data = json.loads(body_bytes.decode("utf-8"))
                     employee_id = data.get("employeeId", "")
                     name = data.get("name", "")
+                    old_name = data.get("oldName", "")
                     photo_urls = data.get("photos", [])
                 elif "multipart/form-data" in content_type:
                     boundary = content_type.split("boundary=")[-1].encode("utf-8")
@@ -321,6 +335,8 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                             headers_str = headers_part.decode("utf-8", errors="ignore")
                             if 'name="name"' in headers_str:
                                 name = body_part.decode("utf-8", errors="ignore").strip()
+                            elif 'name="oldName"' in headers_str:
+                                old_name = body_part.decode("utf-8", errors="ignore").strip()
                             elif 'name="employeeId"' in headers_str:
                                 employee_id = body_part.decode("utf-8", errors="ignore").strip()
                             elif 'name="photos"' in headers_str:
@@ -335,7 +351,20 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                     return
 
                 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                enroll_dir = os.path.join(base_dir, "data", "enroll", target_name)
+                enroll_base = os.path.join(base_dir, "data", "enroll")
+                
+                import shutil
+                # Purge old_name or matching case-insensitive folders to prevent duplicates when renamed
+                targets_to_purge = set([t for t in [target_name, old_name] if t])
+                if os.path.exists(enroll_base):
+                    for folder in os.listdir(enroll_base):
+                        folder_path = os.path.join(enroll_base, folder)
+                        if os.path.isdir(folder_path):
+                            for target in targets_to_purge:
+                                if folder.lower() == target.lower():
+                                    shutil.rmtree(folder_path, ignore_errors=True)
+
+                enroll_dir = os.path.join(enroll_base, target_name)
                 os.makedirs(enroll_dir, exist_ok=True)
 
                 saved_count = 0
