@@ -1,3 +1,5 @@
+"use client";
+
 import React, { useEffect, useState } from 'react';
 
 // Define TypeScript interfaces for the detection data
@@ -48,7 +50,7 @@ const PollingSidebar: React.FC = () => {
     fetchDetections();
 
     // Set up polling interval
-    const intervalId = setInterval(fetchDetections, 100);
+    const intervalId = setInterval(fetchDetections, 1000);
 
     // Cleanup on unmount
     return () => {

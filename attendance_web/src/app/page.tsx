@@ -1,5 +1,5 @@
 import React from 'react';
-import PollingSidebar from '../../../../frontend_components/PollingSidebar';
+import PollingSidebar from '../components/PollingSidebar';
 
 export default function Home() {
   return (

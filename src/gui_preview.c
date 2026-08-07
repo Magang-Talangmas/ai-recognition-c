@@ -493,6 +493,9 @@ void gui_window_render(
 
     /* 4. Export Fixed Canonical 1280x720 Frame to Shared Memory for Web & Mobile */
     if (win->shm_ptr) {
+        uint32_t *hdr32 = (uint32_t *)win->shm_ptr;
+        hdr32[0] = 0; /* Temporarily invalidate header while GetDIBits writes pixels */
+
         BITMAPINFO shm_bmi;
         memset(&shm_bmi, 0, sizeof(shm_bmi));
         shm_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -506,13 +509,12 @@ void gui_window_render(
         GetDIBits(win->hdc_mem, win->hbm_mem, 0, CANONICAL_CANVAS_H, pixels, &shm_bmi, DIB_RGB_COLORS);
 
         /* Write 24-byte header: uint32 magic (TMAS), uint32 width, uint32 height, uint32 channels, uint64 seq */
-        uint32_t *hdr32 = (uint32_t *)win->shm_ptr;
         uint64_t *hdr64 = (uint64_t *)(win->shm_ptr + 16);
         hdr32[1] = (uint32_t)CANONICAL_CANVAS_W;
         hdr32[2] = (uint32_t)CANONICAL_CANVAS_H;
         hdr32[3] = 3;
         (*hdr64)++;
-        hdr32[0] = 0x53414D54; /* 'TMAS' magic */
+        hdr32[0] = 0x53414D54; /* 'TMAS' magic - validate after write completes */
     }
 
     /* 5. Letterbox / Pillarbox Scale to Desktop Window Client Area */

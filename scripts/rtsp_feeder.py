@@ -31,19 +31,6 @@ binary_stream = os.fdopen(REAL_STDOUT_FD, "wb", buffering=0)
 
 MAGIC = 0x53414D54  # 'TMAS' in little endian
 
-
-def get_iou(bb1, bb2):
-    x_left = max(bb1[0], bb2[0])
-    y_top = max(bb1[1], bb2[1])
-    x_right = min(bb1[2], bb2[2])
-    y_bottom = min(bb1[3], bb2[3])
-    if x_right < x_left or y_bottom < y_top: return 0.0
-    intersection_area = (x_right - x_left) * (y_bottom - y_top)
-    bb1_area = (bb1[2] - bb1[0]) * (bb1[3] - bb1[1])
-    bb2_area = (bb2[2] - bb2[0]) * (bb2[3] - bb2[1])
-    if bb1_area + bb2_area - intersection_area <= 0: return 0.0
-    return intersection_area / float(bb1_area + bb2_area - intersection_area)
-
 class ZeroLatencyRTSPCapture:
     """Threaded RTSP frame grabber that eliminates buffer accumulation and lag."""
     def __init__(self, source):
@@ -180,6 +167,8 @@ stream_stats = {
     "resolution": ""
 }
 
+global_face_engine = None
+
 # In-memory cache for employee profile thumbnails
 profile_cache = {}
 
@@ -237,9 +226,107 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 class MJPEGStreamHandler(BaseHTTPRequestHandler):
-    """Serve Live MJPEG stream, snapshot JPEG, and telemetry status."""
+    """Serve Live MJPEG stream, snapshot JPEG, telemetry status, and employee sync endpoint."""
     def log_message(self, format, *args):
         return  # Suppress noisy HTTP request logging
+
+    def do_POST(self):
+        global global_face_engine
+        if self.path in ["/register", "/api/v1/employees/sync-ml"]:
+            try:
+                content_type = self.headers.get("content-type", "")
+                content_length = int(self.headers.get("content-length", 0))
+                body_bytes = self.rfile.read(content_length) if content_length > 0 else b""
+
+                name = ""
+                employee_id = ""
+                photo_urls = []
+                uploaded_files = []
+
+                if "application/json" in content_type:
+                    import json
+                    data = json.loads(body_bytes.decode("utf-8"))
+                    employee_id = data.get("employeeId", "")
+                    name = data.get("name", "")
+                    photo_urls = data.get("photos", [])
+                elif "multipart/form-data" in content_type:
+                    boundary = content_type.split("boundary=")[-1].encode("utf-8")
+                    parts = body_bytes.split(b"--" + boundary)
+                    for part in parts:
+                        if b"Content-Disposition" in part:
+                            headers_part, body_part = part.split(b"\r\n\r\n", 1)
+                            body_part = body_part.rstrip(b"\r\n--")
+                            headers_str = headers_part.decode("utf-8", errors="ignore")
+                            if 'name="name"' in headers_str:
+                                name = body_part.decode("utf-8", errors="ignore").strip()
+                            elif 'name="employeeId"' in headers_str:
+                                employee_id = body_part.decode("utf-8", errors="ignore").strip()
+                            elif 'name="photos"' in headers_str:
+                                uploaded_files.append(body_part)
+
+                target_name = name if name else employee_id
+                if not target_name:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"success": false, "message": "Missing name or employeeId"}')
+                    return
+
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                enroll_dir = os.path.join(base_dir, "data", "enroll", target_name)
+                os.makedirs(enroll_dir, exist_ok=True)
+
+                saved_count = 0
+                for idx, img_bytes in enumerate(uploaded_files):
+                    if len(img_bytes) > 0:
+                        out_path = os.path.join(enroll_dir, f"photo_{idx+1}.jpg")
+                        with open(out_path, "wb") as f:
+                            f.write(img_bytes)
+                        saved_count += 1
+
+                import urllib.request
+                for idx, url in enumerate(photo_urls):
+                    try:
+                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            img_data = resp.read()
+                            out_path = os.path.join(enroll_dir, f"photo_url_{idx+1}.jpg")
+                            with open(out_path, "wb") as f:
+                                f.write(img_data)
+                            saved_count += 1
+                    except Exception as err:
+                        sys.stderr.write(f"[Feeder] Failed to download photo URL {url}: {err}\n")
+
+                sys.stderr.write(f"[Feeder] Enrolled photos saved for '{target_name}' ({saved_count} photos).\n")
+
+                # Re-generate embeddings.bin
+                try:
+                    from scripts.re_enroll_local_insightface import enroll_local
+                    enroll_local()
+                except Exception:
+                    try:
+                        import re_enroll_local_insightface
+                        re_enroll_local_insightface.enroll_local()
+                    except Exception as err:
+                        sys.stderr.write(f"[Feeder] Re-enroll error: {err}\n")
+
+                if global_face_engine is not None:
+                    global_face_engine.reload_embeddings()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                resp_str = f'{{"success": true, "message": "Enrolled employee successfully", "name": "{target_name}", "photos_saved": {saved_count}}}'
+                self.wfile.write(resp_str.encode("utf-8"))
+            except Exception as err:
+                sys.stderr.write(f"[Feeder] Error in POST /sync-ml: {err}\n")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(f'{{"success": false, "error": "{err}"}}'.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def do_GET(self):
         global latest_jpeg_frame, stream_stats
@@ -488,11 +575,23 @@ def main():
             sys.path.insert(0, base_dir)
 
         from insightface.app import FaceAnalysis
+        from insightface.app.common import Face
+
+        def compute_iou(boxA, boxB):
+            xA = max(boxA[0], boxB[0])
+            yA = max(boxA[1], boxB[1])
+            xB = min(boxA[2], boxB[2])
+            yB = min(boxA[3], boxB[3])
+            interArea = max(0, xB - xA) * max(0, yB - yA)
+            boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+            boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+            return interArea / float(boxAArea + boxBArea - interArea + 1e-5)
 
         class StandaloneInsightFaceEngine:
             def __init__(self, device="CPU"):
                 self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
                 self.app.prepare(ctx_id=0, det_size=(320, 320))
+                self.track_cache = []
                 
                 # Load embeddings.bin for matching
                 self.emp_ids = []
@@ -511,6 +610,26 @@ def main():
                                 self.templates.append(vec)
                     sys.stderr.write(f"[Feeder] Loaded {len(self.emp_ids)} faces for /detect API.\n")
 
+            def reload_embeddings(self):
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                bin_path = os.path.join(base_dir, "data", "embeddings.bin")
+                new_emp_ids = []
+                new_templates = []
+                if os.path.exists(bin_path):
+                    with open(bin_path, "rb") as f:
+                        magic = f.read(8)
+                        if magic == b"FACES1\x00\x00":
+                            num_faces, dim = struct.unpack("<ii", f.read(8))
+                            for _ in range(num_faces):
+                                name_bytes = f.read(128)
+                                name = name_bytes.rstrip(b'\x00').decode('utf-8', errors='ignore')
+                                vec = np.frombuffer(f.read(dim * 4), dtype=np.float32)
+                                new_emp_ids.append(name)
+                                new_templates.append(vec)
+                self.emp_ids = new_emp_ids
+                self.templates = new_templates
+                sys.stderr.write(f"[Feeder] Memory reloaded: {len(self.emp_ids)} faces active for /detect API.\n")
+
             def match(self, emb, threshold=0.45):
                 if not self.templates or emb is None:
                     return "", None, 0.0, False
@@ -521,32 +640,77 @@ def main():
                 return "", None, float(scores[best_idx]), False
 
             def detect(self, frame):
-                faces = self.app.get(frame)
-                if not faces or len(faces) == 0:
+                bboxes, kpss = self.app.models['detection'].detect(frame, max_num=0, metric='default')
+                if bboxes.shape[0] == 0:
+                    self.track_cache = []
                     return []
 
                 results = []
-                for face in faces:
+                new_cache = []
+                for i in range(bboxes.shape[0]):
+                    bbox = bboxes[i, 0:4]
+                    det_score = bboxes[i, 4]
+                    kps = kpss[i] if kpss is not None else None
+                    
+                    # Find best match in track cache using IoU
+                    best_iou = 0
+                    best_cached = None
+                    for cached in self.track_cache:
+                        iou = compute_iou(bbox, cached['bbox'])
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_cached = cached
+                            
                     class FaceObj:
                         pass
                     f = FaceObj()
-                    f.bbox = face.bbox
-                    f.detection_score = float(face.det_score)
+                    f.bbox = bbox
+                    f.detection_score = float(det_score)
                     f.blur_score = 50.0
-                    f.landmarks = face.landmark_2d_106
-                    if hasattr(face, 'kps') and face.kps is not None:
-                        f.landmarks = face.kps
-                    f.embedding = face.embedding
+                    f.landmarks = kps
                     
-                    pid, name, sim, is_match = self.match(f.embedding)
-                    
-                    f.person_id = pid
-                    f.person_name = name
-                    f.similarity = sim
+                    # If same face detected, skip heavy ArcFace embedding and reuse previous identity seamlessly
+                    if best_iou > 0.4:
+                        f.embedding = best_cached['embedding']
+                        f.person_id = best_cached['name']
+                        f.person_name = best_cached['name']
+                        f.similarity = best_cached['sim']
+                        
+                        new_cache.append({
+                            'bbox': bbox,
+                            'embedding': f.embedding,
+                            'name': f.person_name,
+                            'sim': f.similarity,
+                            'age': best_cached['age'] + 1
+                        })
+                    else:
+                        # Extract deep features (ArcFace) only for new faces or refresh every 30 frames
+                        face_info = Face(bbox=bbox, kps=kps, det_score=det_score)
+                        for taskname, model in self.app.models.items():
+                            if taskname == 'detection': continue
+                            model.get(frame, face_info)
+                            
+                        f.embedding = face_info.embedding if face_info.embedding is not None else np.zeros(512, dtype=np.float32)
+                        pid, name, sim, is_match = self.match(f.embedding)
+                        f.person_id = pid
+                        f.person_name = name
+                        f.similarity = sim
+                        
+                        new_cache.append({
+                            'bbox': bbox,
+                            'embedding': f.embedding,
+                            'name': name,
+                            'sim': sim,
+                            'age': 0
+                        })
                     results.append(f)
+                    
+                self.track_cache = new_cache
                 return results
 
         face_engine = StandaloneInsightFaceEngine(device="CPU")
+        global global_face_engine
+        global_face_engine = face_engine
         sys.stderr.write("[Feeder] Standalone InsightFace Engine initialized successfully.\n")
     except Exception as e:
         sys.stderr.write(f"[Feeder] FaceEngine error: {e}\n")
@@ -574,12 +738,62 @@ def main():
     fps_counter = 0
     current_fps = 0.0
 
-    shm = None
+    # Background worker for Shared Memory reading and MJPEG JPEG encoding (Decoupled from feeder loop)
+    latest_camera_frame = None
+    frame_lock = threading.Lock()
+
+    def mjpeg_encoder_worker():
+        nonlocal latest_camera_frame
+        global latest_jpeg_frame, jpeg_cond
+        shm_local = None
+        
+        while True:
+            frame_to_serve = None
+            if shm_local is None:
+                try:
+                    import mmap
+                    shm_local = mmap.mmap(-1, 16 * 1024 * 1024, tagname="Local\\TMAS_PREVIEW_SHM", access=mmap.ACCESS_READ)
+                except Exception:
+                    shm_local = None
+
+            if shm_local is not None:
+                try:
+                    shm_local.seek(0)
+                    hdr = shm_local.read(24)
+                    if len(hdr) == 24:
+                        magic, shm_w, shm_h, shm_c, seq = struct.unpack("<IIIIQ", hdr)
+                        if magic == 0x53414D54 and 0 < shm_w <= 3840 and 0 < shm_h <= 2160 and shm_c == 3:
+                            raw_bytes = shm_local.read(shm_w * shm_h * 3)
+                            if len(raw_bytes) == shm_w * shm_h * 3:
+                                frame_to_serve = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((shm_h, shm_w, 3))
+                except Exception:
+                    shm_local = None
+
+            if frame_to_serve is None and shm_local is None:
+                with frame_lock:
+                    if latest_camera_frame is not None:
+                        frame_to_serve = latest_camera_frame.copy()
+
+            if frame_to_serve is not None:
+                try:
+                    ret_enc, jpeg_bytes = cv2.imencode(".jpg", frame_to_serve, [cv2.IMWRITE_JPEG_QUALITY, 55])
+                    if ret_enc:
+                        with jpeg_cond:
+                            latest_jpeg_frame = jpeg_bytes.tobytes()
+                            jpeg_cond.notify_all()
+                except Exception:
+                    pass
+
+            # Maintain ~30 FPS for Web/Mobile MJPEG preview without impacting feeder throughput
+            time.sleep(0.033)
+
+    encoder_thread = threading.Thread(target=mjpeg_encoder_worker, daemon=True)
+    encoder_thread.start()
 
     while True:
         ret, frame = capture.read_fresh()
         if not ret or frame is None:
-            time.sleep(0.005)
+            time.sleep(0.001)
             continue
 
         frame_counter += 1
@@ -588,51 +802,12 @@ def main():
         if frame.shape[1] != target_width or frame.shape[0] != target_height:
             frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_NEAREST)
 
-        # Trigger background heavy recognition every 2 frames
-        if frame_counter % 2 == 0:
-            detector.submit_frame(frame)
+        with frame_lock:
+            latest_camera_frame = frame
 
-        async_faces = detector.get_faces()
-
-        # Fast synchronous detection for perfect bounding box sync
-        bboxes, kpss = face_engine.app.det_model.detect(frame, max_num=16, metric='default')
-        
-        synced_faces = []
-        if bboxes is not None and bboxes.shape[0] > 0:
-            for i in range(bboxes.shape[0]):
-                bbox = bboxes[i, 0:4]
-                det_score = bboxes[i, 4]
-                
-                class FaceObj: pass
-                f = FaceObj()
-                f.bbox = bbox
-                f.detection_score = float(det_score)
-                f.blur_score = 50.0
-                f.landmarks = kpss[i] if kpss is not None else None
-                f.embedding = __import__('numpy').zeros(512, dtype=__import__('numpy').float32)
-                f.person_id = ''
-                f.person_name = 'Unknown'
-                f.similarity = 0.0
-                
-                # IoU Match with async faces for identity
-                best_iou = 0
-                best_async_face = None
-                for af in async_faces:
-                    iou = get_iou(bbox, getattr(af, 'bbox', [0,0,0,0]))
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_async_face = af
-                
-                if best_iou > 0.3 and best_async_face is not None:
-                    f.person_id = getattr(best_async_face, 'person_id', '')
-                    f.person_name = getattr(best_async_face, 'person_name', 'Unknown')
-                    f.similarity = getattr(best_async_face, 'similarity', 0.0)
-                    if hasattr(best_async_face, 'embedding') and best_async_face.embedding is not None:
-                        f.embedding = best_async_face.embedding
-
-                synced_faces.append(f)
-        
-        faces = synced_faces
+        # Synchronous face detection to guarantee perfectly aligned bounding boxes
+        # The background capture thread will automatically drop skipped frames
+        faces = face_engine.detect(frame)
         num_faces = min(len(faces), 16)
 
         # Calculate FPS
@@ -690,46 +865,6 @@ def main():
                 binary_stream.flush()
             except (BrokenPipeError, OSError):
                 is_piped = False
-
-        # =========================================================================
-        # Direct Synchronization with Native C Desktop Window via Shared Memory
-        # =========================================================================
-        frame_to_serve = None
-        if shm is None:
-            try:
-                import mmap
-                shm = mmap.mmap(-1, 16 * 1024 * 1024, tagname="Local\\TMAS_PREVIEW_SHM", access=mmap.ACCESS_READ)
-            except Exception:
-                shm = None
-
-        if shm is not None:
-            try:
-                shm.seek(0)
-                hdr = shm.read(24)
-                if len(hdr) == 24:
-                    magic, shm_w, shm_h, shm_c, seq = struct.unpack("<IIIIQ", hdr)
-                    if magic == 0x53414D54 and 0 < shm_w <= 3840 and 0 < shm_h <= 2160 and shm_c == 3:
-                        raw_bytes = shm.read(shm_w * shm_h * 3)
-                        if len(raw_bytes) == shm_w * shm_h * 3:
-                            frame_to_serve = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((shm_h, shm_w, 3))
-            except Exception:
-                shm = None
-
-        # Fallback to camera frame if C preview is initializing
-        if frame_to_serve is None:
-            frame_to_serve = frame
-
-        # Encode composite frame to JPEG for HTTP clients (100% pixel-synced with Desktop GUI)
-        # Throttled to every 2nd frame at 50% quality to save CPU overhead
-        if frame_counter % 2 == 0:
-            ret_enc, jpeg_bytes = cv2.imencode(".jpg", frame_to_serve, [cv2.IMWRITE_JPEG_QUALITY, 50])
-            if ret_enc:
-                with jpeg_cond:
-                    latest_jpeg_frame = jpeg_bytes.tobytes()
-                    jpeg_cond.notify_all()
-
-        # Brief yield to keep CPU healthy while maintaining high frame rate
-        time.sleep(0.005)
 
     capture.release()
 
