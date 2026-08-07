@@ -711,11 +711,10 @@ def main():
 
         class StandaloneInsightFaceEngine:
             def __init__(self, device="CPU"):
+                self.lock = threading.Lock()
                 self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-                self.app.prepare(ctx_id=0, det_size=(320, 320))
+                self.app.prepare(ctx_id=0, det_size=(640, 640))
                 self.track_cache = []
-                
-                # Load embeddings.bin for matching
                 self.emp_ids = []
                 self.templates = []
                 bin_path = os.path.join(base_dir, "data", "embeddings.bin")
@@ -748,18 +747,28 @@ def main():
                                 vec = np.frombuffer(f.read(dim * 4), dtype=np.float32)
                                 new_emp_ids.append(name)
                                 new_templates.append(vec)
-                self.emp_ids = new_emp_ids
-                self.templates = new_templates
+                with self.lock:
+                    self.emp_ids = new_emp_ids
+                    self.templates = new_templates
                 sys.stderr.write(f"[Feeder] Memory reloaded: {len(self.emp_ids)} faces active for /detect API.\n")
 
             def match(self, emb, threshold=0.45):
-                if not self.templates or emb is None:
+                with self.lock:
+                    templates = list(self.templates)
+                    emp_ids = list(self.emp_ids)
+
+                if not templates or not emp_ids or emb is None or len(templates) != len(emp_ids):
                     return "", None, 0.0, False
-                scores = np.dot(self.templates, emb)
-                best_idx = np.argmax(scores)
-                if scores[best_idx] > threshold:
-                    return self.emp_ids[best_idx], self.emp_ids[best_idx], float(scores[best_idx]), True
-                return "", None, float(scores[best_idx]), False
+                try:
+                    scores = np.dot(templates, emb)
+                    if scores is None or len(scores) == 0:
+                        return "", None, 0.0, False
+                    best_idx = int(np.argmax(scores))
+                    if 0 <= best_idx < len(emp_ids) and scores[best_idx] > threshold:
+                        return emp_ids[best_idx], emp_ids[best_idx], float(scores[best_idx]), True
+                    return "", None, float(scores[best_idx]) if 0 <= best_idx < len(scores) else 0.0, False
+                except Exception:
+                    return "", None, 0.0, False
 
             def detect(self, frame):
                 bboxes, kpss = self.app.models['detection'].detect(frame, max_num=0, metric='default')
@@ -935,7 +944,11 @@ def main():
 
         # Synchronous face detection to guarantee perfectly aligned bounding boxes
         # The background capture thread will automatically drop skipped frames
-        faces = face_engine.detect(frame)
+        try:
+            faces = face_engine.detect(frame)
+        except Exception as err:
+            sys.stderr.write(f"[Feeder] Error in face detection: {err}\n")
+            faces = []
         num_faces = min(len(faces), 16)
 
         # Calculate FPS
