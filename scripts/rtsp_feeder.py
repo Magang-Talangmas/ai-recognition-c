@@ -62,6 +62,8 @@ class ZeroLatencyRTSPCapture:
                     pass
             
             is_rtsp = isinstance(self.source, str) and self.source.startswith("rtsp")
+            if is_rtsp:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|max_delay;500000"
             backend = self.cv2.CAP_FFMPEG if is_rtsp else self.cv2.CAP_ANY
             self.cap = self.cv2.VideoCapture(self.source, backend)
             self.cap.set(self.cv2.CAP_PROP_BUFFERSIZE, 1)
