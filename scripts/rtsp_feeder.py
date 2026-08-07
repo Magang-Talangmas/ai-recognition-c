@@ -268,12 +268,25 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                     for folder in os.listdir(enroll_base):
                         folder_path = os.path.join(enroll_base, folder)
                         if os.path.isdir(folder_path):
+                            should_purge = False
+                            meta_file = os.path.join(folder_path, "metadata.json")
+                            if os.path.exists(meta_file):
+                                try:
+                                    import json
+                                    with open(meta_file, "r") as mf:
+                                        mdata = json.load(mf)
+                                        if employee_id and mdata.get("employeeId") == employee_id:
+                                            should_purge = True
+                                except Exception:
+                                    pass
                             for target in targets_to_purge:
                                 if folder.lower() == target.lower() or target.lower() in folder.lower():
-                                    shutil.rmtree(folder_path, ignore_errors=True)
-                                    sys.stderr.write(f"[Feeder] Deleted enroll directory: {folder_path}\n")
-                                    deleted_any = True
-                                    break
+                                    should_purge = True
+
+                            if should_purge:
+                                shutil.rmtree(folder_path, ignore_errors=True)
+                                sys.stderr.write(f"[Feeder] Deleted enroll directory: {folder_path}\n")
+                                deleted_any = True
 
                 # Re-generate embeddings.bin
                 try:
@@ -354,18 +367,39 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                 enroll_base = os.path.join(base_dir, "data", "enroll")
                 
                 import shutil
-                # Purge old_name or matching case-insensitive folders to prevent duplicates when renamed
+                # Purge old_name, matching employeeId from metadata.json, or case-insensitive folders
                 targets_to_purge = set([t for t in [target_name, old_name] if t])
                 if os.path.exists(enroll_base):
                     for folder in os.listdir(enroll_base):
                         folder_path = os.path.join(enroll_base, folder)
                         if os.path.isdir(folder_path):
+                            should_purge = False
+                            meta_file = os.path.join(folder_path, "metadata.json")
+                            if os.path.exists(meta_file):
+                                try:
+                                    import json
+                                    with open(meta_file, "r") as mf:
+                                        mdata = json.load(mf)
+                                        if employee_id and mdata.get("employeeId") == employee_id:
+                                            should_purge = True
+                                except Exception:
+                                    pass
                             for target in targets_to_purge:
                                 if folder.lower() == target.lower():
-                                    shutil.rmtree(folder_path, ignore_errors=True)
+                                    should_purge = True
+
+                            if should_purge:
+                                shutil.rmtree(folder_path, ignore_errors=True)
 
                 enroll_dir = os.path.join(enroll_base, target_name)
                 os.makedirs(enroll_dir, exist_ok=True)
+
+                # Write metadata.json binding employeeId <-> folder name for reliable rename tracking
+                if employee_id:
+                    import json
+                    meta_path = os.path.join(enroll_dir, "metadata.json")
+                    with open(meta_path, "w") as mf:
+                        json.dump({"employeeId": employee_id, "name": target_name}, mf)
 
                 saved_count = 0
                 for idx, img_bytes in enumerate(uploaded_files):
