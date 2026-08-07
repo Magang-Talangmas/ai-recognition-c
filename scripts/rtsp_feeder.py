@@ -46,6 +46,7 @@ class ZeroLatencyRTSPCapture:
         self.cap = None
         self.latest_frame = None
         self.lock = threading.Lock()
+        self.frame_seq = 0
         self.running = True
         self.is_connected = False
         
@@ -96,6 +97,7 @@ class ZeroLatencyRTSPCapture:
                     if ret and frame is not None:
                         with self.lock:
                             self.latest_frame = frame
+                            self.frame_seq += 1
                 else:
                     time.sleep(0.005)
                     if self.cap is None or not self.cap.isOpened():
@@ -104,11 +106,11 @@ class ZeroLatencyRTSPCapture:
                 self.is_connected = False
                 time.sleep(0.05)
 
-    def read_fresh(self):
+    def read_fresh(self, last_seq=0):
         with self.lock:
-            if self.latest_frame is not None:
-                return True, self.latest_frame.copy()
-            return False, None
+            if self.latest_frame is not None and self.frame_seq != last_seq:
+                return True, self.latest_frame.copy(), self.frame_seq
+            return False, None, last_seq
 
     def release(self):
         self.running = False
@@ -717,7 +719,8 @@ def main():
         class StandaloneInsightFaceEngine:
             def __init__(self, device="CPU"):
                 self.lock = threading.Lock()
-                self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+                provider_opts = {"intra_op_num_threads": 2, "inter_op_num_threads": 1}
+                self.app = FaceAnalysis(name="buffalo_l", providers=[("CPUExecutionProvider", provider_opts)])
                 self.app.prepare(ctx_id=0, det_size=(320, 320))
                 self.track_cache = []
                 self.emp_ids = []
@@ -959,10 +962,11 @@ def main():
     encoder_thread = threading.Thread(target=mjpeg_encoder_worker, daemon=True)
     encoder_thread.start()
 
+    last_camera_seq = 0
     while True:
-        ret, frame = capture.read_fresh()
+        ret, frame, last_camera_seq = capture.read_fresh(last_camera_seq)
         if not ret or frame is None:
-            time.sleep(0.001)
+            time.sleep(0.002)
             continue
 
         frame_counter += 1
