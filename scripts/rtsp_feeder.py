@@ -230,6 +230,68 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return  # Suppress noisy HTTP request logging
 
+    def do_DELETE(self):
+        global global_face_engine
+        if self.path in ["/register", "/api/v1/employees/sync-ml", "/delete"]:
+            try:
+                content_length = int(self.headers.get("content-length", 0))
+                body_bytes = self.rfile.read(content_length) if content_length > 0 else b""
+                name = ""
+                employee_id = ""
+                if body_bytes:
+                    import json
+                    try:
+                        data = json.loads(body_bytes.decode("utf-8"))
+                        employee_id = data.get("employeeId", "")
+                        name = data.get("name", "")
+                    except Exception:
+                        pass
+                
+                target_name = name if name else employee_id
+                if not target_name:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"success": false, "message": "Missing name or employeeId"}')
+                    return
+
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                enroll_dir = os.path.join(base_dir, "data", "enroll", target_name)
+                
+                import shutil
+                if os.path.exists(enroll_dir):
+                    shutil.rmtree(enroll_dir, ignore_errors=True)
+                    sys.stderr.write(f"[Feeder] Deleted enroll directory: {enroll_dir}\n")
+
+                # Re-generate embeddings.bin
+                try:
+                    from scripts.re_enroll_local_insightface import enroll_local
+                    enroll_local()
+                except Exception:
+                    try:
+                        import re_enroll_local_insightface
+                        re_enroll_local_insightface.enroll_local()
+                    except Exception as err:
+                        sys.stderr.write(f"[Feeder] Re-enroll error after delete: {err}\n")
+
+                if global_face_engine is not None:
+                    global_face_engine.reload_embeddings()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                resp_str = f'{{"success": true, "message": "Deleted employee from ML successfully", "name": "{target_name}"}}'
+                self.wfile.write(resp_str.encode("utf-8"))
+            except Exception as err:
+                sys.stderr.write(f"[Feeder] Error in DELETE /sync-ml: {err}\n")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(f'{{"success": false, "error": "{err}"}}'.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_POST(self):
         global global_face_engine
         if self.path in ["/register", "/api/v1/employees/sync-ml"]:
