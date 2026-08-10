@@ -473,7 +473,7 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
             while True:
                 with jpeg_cond:
                     if latest_jpeg_frame is last_frame_bytes or latest_jpeg_frame is None:
-                        jpeg_cond.wait(timeout=0.033)
+                        jpeg_cond.wait(timeout=0.066)
                     frame_bytes = latest_jpeg_frame
 
                 if frame_bytes is not None and frame_bytes is not last_frame_bytes:
@@ -857,7 +857,12 @@ def main():
 
     # Start HTTP Streaming Server for Frontend & Mobile
     try:
+        import socket
         http_server = ThreadedHTTPServer(("0.0.0.0", stream_port), MJPEGStreamHandler)
+        try:
+            http_server.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
         http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
         http_thread.start()
         sys.stderr.write(f"[Stream Server] Live HTTP MJPEG Stream active on http://0.0.0.0:{stream_port}/stream\n")
@@ -957,7 +962,7 @@ def main():
                 except Exception:
                     pass
 
-            time.sleep(0.033)
+            time.sleep(0.001)
 
     encoder_thread = threading.Thread(target=mjpeg_encoder_worker, daemon=True)
     encoder_thread.start()
