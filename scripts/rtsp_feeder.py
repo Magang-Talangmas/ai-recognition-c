@@ -978,10 +978,10 @@ def main():
         with frame_lock:
             latest_camera_frame = frame
 
-        # Synchronous face detection with fast SCRFD (320x320) to guarantee 100% frame-aligned bounding boxes
-        # Zero lag, zero bounding box offset, and zero stream blinking
+        # Asynchronous face detection to maintain 30+ FPS stream throughput
         try:
-            faces = face_engine.detect(frame)
+            detector.submit_frame(frame)
+            faces = detector.get_faces()
         except Exception as err:
             sys.stderr.write(f"[Feeder] Error in face detection: {err}\n")
             faces = []

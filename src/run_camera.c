@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
         }
 
         double t_infer_start = get_monotonic_time_seconds();
-        if (num_faces == 0 && face_engine) {
+        if (num_faces == 0 && face_engine && !cap) {
             num_faces = face_engine_detect(face_engine, &frame, faces, MAX_DETECTED_FACES);
         }
         double inference_ms = (get_monotonic_time_seconds() - t_infer_start) * 1000.0;
