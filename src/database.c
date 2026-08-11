@@ -165,9 +165,9 @@ int64_t attendance_db_create_pending_event(
 
     /* Check duplicate cooldown within window */
     const char *CHECK_COOLDOWN_SQL =
-        "SELECT id, detected_at FROM attendance_events "
+        "SELECT id FROM attendance_events "
         "WHERE camera_id = ? AND employee_id = ? AND event_type = ? "
-        "  AND status = 'PENDING_CONFIRMATION' "
+        "  AND (julianday('now') - julianday(detected_at)) * 86400.0 < ? "
         "ORDER BY id DESC LIMIT 1;";
 
     sqlite3_stmt *stmt = NULL;
@@ -176,9 +176,10 @@ int64_t attendance_db_create_pending_event(
         sqlite3_bind_text(stmt, 1, camera_id, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, employee_id, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 3, event_type, -1, SQLITE_STATIC);
+        sqlite3_bind_double(stmt, 4, (double)db->duplicate_cooldown_seconds);
 
         if (sqlite3_step(stmt) == SQLITE_ROW) {
-            /* Existing pending event exists, suppress duplicate */
+            /* Existing pending event exists within cooldown window, suppress duplicate */
             sqlite3_finalize(stmt);
             return -1;
         }

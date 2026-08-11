@@ -1,4 +1,4 @@
-﻿"""
+"""
 Sync Employee Photos from Cloudinary & Auto-Generate C Binary Embeddings (embeddings.bin)
 Standalone inside ai-recognition-c. Zero external dependencies required.
 
@@ -279,11 +279,23 @@ def main() -> None:
                             emp_vectors.append(best_face.embedding)
 
                 if emp_vectors:
+                    import json
+                    actual_id = emp_dir.name
+                    meta_path = emp_dir / "metadata.json"
+                    if meta_path.exists():
+                        try:
+                            with open(meta_path, "r") as mf:
+                                mdata = json.load(mf)
+                                if mdata.get("employeeId"):
+                                    actual_id = mdata["employeeId"]
+                        except Exception:
+                            pass
+                    
                     mean_vec = np.mean(emp_vectors, axis=0)
                     mean_vec = mean_vec / np.linalg.norm(mean_vec)
-                    emp_ids.append(emp_dir.name)
+                    emp_ids.append(actual_id)
                     templates.append(mean_vec)
-                    print(f"  Γ£à [ENROLLED] '{emp_dir.name}' ({len(emp_vectors)} foto valid)")
+                    print(f"  ✅ [ENROLLED] '{emp_dir.name}' as '{actual_id}' ({len(emp_vectors)} foto valid)")
 
             if emp_ids:
                 # Save binary format FACES1
