@@ -760,7 +760,7 @@ def main():
                     self.templates = new_templates
                 sys.stderr.write(f"[Feeder] Memory reloaded: {len(self.emp_ids)} faces active for /detect API.\n")
 
-            def match(self, emb, threshold=0.45):
+            def match(self, emb, threshold=0.35):
                 with self.lock:
                     templates = list(self.templates)
                     emp_ids = list(self.emp_ids)
@@ -809,7 +809,7 @@ def main():
                     f.landmarks = kps
                     
                     # If same face detected, skip heavy ArcFace embedding and reuse previous identity seamlessly
-                    if best_iou > 0.4:
+                    if best_iou > 0.4 and best_cached['age'] < 15:
                         f.embedding = best_cached['embedding']
                         f.person_id = best_cached['name']
                         f.person_name = best_cached['name']
@@ -829,7 +829,12 @@ def main():
                             if taskname == 'detection': continue
                             model.get(frame, face_info)
                             
-                        f.embedding = face_info.embedding if face_info.embedding is not None else np.zeros(512, dtype=np.float32)
+                        emb = face_info.embedding if face_info.embedding is not None else np.zeros(512, dtype=np.float32)
+                        norm = np.linalg.norm(emb)
+                        if norm > 0:
+                            emb = emb / norm
+                        f.embedding = emb
+                        
                         pid, name, sim, is_match = self.match(f.embedding)
                         f.person_id = pid
                         f.person_name = name
@@ -963,11 +968,29 @@ def main():
     encoder_thread.start()
 
     last_camera_seq = 0
+    target_fps = 30.0
+    frame_delay = 1.0 / target_fps
+    next_frame_time = time.time()
+
     while True:
-        ret, frame, last_camera_seq = capture.read_fresh(last_camera_seq)
-        if not ret or frame is None:
-            time.sleep(0.002)
+        now = time.time()
+        if now < next_frame_time:
+            time.sleep(max(0.001, next_frame_time - now))
+            
+        next_frame_time += frame_delay
+        if time.time() > next_frame_time + 0.1:
+            next_frame_time = time.time()
+            
+        with capture.lock:
+            frame = capture.latest_frame
+            if frame is not None:
+                frame = frame.copy()
+            seq = capture.frame_seq
+            
+        if frame is None:
             continue
+            
+        last_camera_seq = seq
 
         frame_counter += 1
         fps_counter += 1
@@ -996,14 +1019,14 @@ def main():
             stream_stats["fps"] = round(current_fps, 1)
             stream_stats["faces_detected"] = num_faces
             stream_stats["active_names"] = [
-                getattr(f, 'person_name', 'Unknown') for f in faces if getattr(f, 'person_name', None)
+                f.person_name for f in faces if getattr(f, 'person_name', None) not in [None, "", "Unknown"]
             ]
             stream_stats["detect_details"] = [
                 {
-                    "name": getattr(f, 'person_name', 'Unknown'),
+                    "name": f.person_name,
                     "similarity": getattr(f, 'similarity', 0.0),
                     "bbox": [int(b) for b in getattr(f, 'bbox', [0,0,0,0])]
-                } for f in faces if getattr(f, 'person_name', None)
+                } for f in faces if getattr(f, 'person_name', None) not in [None, "", "Unknown"]
             ]
         
         # Write binary stream to C engine if pipe is attached
