@@ -487,9 +487,45 @@ class MJPEGStreamHandler(BaseHTTPRequestHandler):
                     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                         break
 
-        elif self.path == "/snapshot":
-            with jpeg_lock:
-                frame_bytes = latest_jpeg_frame
+        elif self.path.startswith("/snapshot"):
+            from urllib.parse import urlparse, parse_qs
+            parsed_path = urlparse(self.path)
+            query = parse_qs(parsed_path.query)
+            bbox_str = query.get('bbox', [None])[0]
+            
+            frame_bytes = None
+            if bbox_str:
+                with frame_lock:
+                    frame_img = latest_camera_frame.copy() if latest_camera_frame is not None else None
+                
+                if frame_img is not None:
+                    try:
+                        x1, y1, x2, y2 = map(float, bbox_str.split(','))
+                        h, w = frame_img.shape[:2]
+                        
+                        box_w, box_h = x2 - x1, y2 - y1
+                        pad_x = box_w * 0.4
+                        pad_y = box_h * 0.4
+                        
+                        px1 = max(0, int(x1 - pad_x))
+                        py1 = max(0, int(y1 - pad_y * 1.2)) # more padding on top for hair
+                        px2 = min(w, int(x2 + pad_x))
+                        py2 = min(h, int(y2 + pad_y * 0.8))
+                        
+                        cropped = frame_img[py1:py2, px1:px2]
+                        if cropped.size > 0:
+                            import cv2
+                            ret_enc, encoded = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            if ret_enc:
+                                frame_bytes = encoded.tobytes()
+                    except Exception as e:
+                        sys.stderr.write(f"[Feeder] Snapshot crop error: {e}\n")
+                        
+            # Fallback to full frame if cropping failed or bbox not provided
+            if frame_bytes is None:
+                with jpeg_lock:
+                    frame_bytes = latest_jpeg_frame
+
             if frame_bytes is not None:
                 self.send_response(200)
                 self.send_header("Access-Control-Allow-Origin", "*")
