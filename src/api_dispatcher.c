@@ -96,7 +96,7 @@ static int winhttp_send_request(
     }
 
     WCHAR headers[512];
-    swprintf(headers, 512, L"Content-Type: application/json\r\nx-api-key: %hs\r\n", api_key ? api_key : "");
+    swprintf(headers, 512, L"Content-Type: application/json\r\napikey: %hs\r\nAuthorization: Bearer %hs\r\n", api_key ? api_key : "", api_key ? api_key : "");
 
     DWORD body_len = (DWORD)strlen(json_body);
     BOOL b_results = WinHttpSendRequest(h_request, headers, (DWORD)-1, (LPVOID)json_body, body_len, body_len, 0);

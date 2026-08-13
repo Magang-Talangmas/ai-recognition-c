@@ -163,26 +163,32 @@ int64_t attendance_db_create_pending_event(
         return -1;
     }
 
-    /* Check duplicate cooldown within window */
-    const char *CHECK_COOLDOWN_SQL =
-        "SELECT id, detected_at FROM attendance_events "
-        "WHERE camera_id = ? AND employee_id = ? AND event_type = ? "
-        "  AND status = 'PENDING_CONFIRMATION' "
-        "ORDER BY id DESC LIMIT 1;";
+    if (db->duplicate_cooldown_seconds > 0) {
+        /* Check duplicate cooldown within window using ISO8601 timestamps */
+        const char *CHECK_COOLDOWN_SQL =
+            "SELECT CAST(strftime('%s', 'now') - strftime('%s', detected_at) AS INTEGER) FROM attendance_events "
+            "WHERE camera_id = ? AND employee_id = ? AND event_type = ? "
+            "ORDER BY id DESC LIMIT 1;";
 
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db->db, CHECK_COOLDOWN_SQL, -1, &stmt, NULL);
-    if (rc == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, camera_id, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, employee_id, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 3, event_type, -1, SQLITE_STATIC);
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(db->db, CHECK_COOLDOWN_SQL, -1, &stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, camera_id, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, employee_id, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, event_type, -1, SQLITE_STATIC);
 
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            /* Existing pending event exists, suppress duplicate */
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                if (sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+                    int seconds_since_last = sqlite3_column_int(stmt, 0);
+                    if (seconds_since_last >= 0 && seconds_since_last < db->duplicate_cooldown_seconds) {
+                        /* Existing event within cooldown window, suppress duplicate */
+                        sqlite3_finalize(stmt);
+                        return -1;
+                    }
+                }
+            }
             sqlite3_finalize(stmt);
-            return -1;
         }
-        sqlite3_finalize(stmt);
     }
 
     char now_iso[64];
@@ -201,7 +207,8 @@ int64_t attendance_db_create_pending_event(
         "    direction, event_type, similarity, status, detected_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_CONFIRMATION', ?);";
 
-    rc = sqlite3_prepare_v2(db->db, INSERT_SQL, -1, &stmt, NULL);
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->db, INSERT_SQL, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "[DB ERROR] Failed to prepare insert statement: %s\n", sqlite3_errmsg(db->db));
         return -1;
