@@ -163,6 +163,8 @@ class AsyncFaceDetector:
 latest_jpeg_frame = None
 jpeg_lock = threading.Lock()
 jpeg_cond = threading.Condition(jpeg_lock)
+latest_camera_frame = None
+frame_lock = threading.Lock()
 stream_stats = {
     "fps": 0.0,
     "faces_detected": 0,
@@ -914,11 +916,10 @@ def main():
     current_fps = 0.0
 
     # Background worker for Shared Memory reading and MJPEG JPEG encoding (Decoupled from feeder loop)
-    latest_camera_frame = None
-    frame_lock = threading.Lock()
+    global latest_camera_frame, frame_lock
 
     def mjpeg_encoder_worker():
-        nonlocal latest_camera_frame
+        global latest_camera_frame
         global latest_jpeg_frame, jpeg_cond
         shm_local = None
         shm_mutex = None
